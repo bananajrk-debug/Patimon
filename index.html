@@ -442,6 +442,86 @@ body.touch .keyhelp{display:none}
   #bpanel{margin:0;max-width:none}
 }
 @media(max-width:420px){ #blog{width:92%;height:84px} .bagbtn{padding:7px 9px;font-size:12px} }
+
+/* =========================================================
+   v6：スマホ（iPhone）最適化・ボタン修正・退出
+========================================================= */
+:root{--app-h:100vh}
+@supports (height:100dvh){:root{--app-h:100dvh}}
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{position:fixed;inset:0;width:100%;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+button,.btn,.mini,.abtn,.selc,.tslot{touch-action:manipulation}
+body.touch button kbd{display:none}
+.screen{height:var(--app-h);min-height:0;overflow:hidden;
+  padding:calc(12px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left))}
+/* 中央寄せでも、はみ出す時は上下が切れないように auto マージンで中央寄せ */
+#title,#lobby,#result{justify-content:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch}
+#title>:first-child,#lobby>:first-child,#result>:first-child{margin-top:auto}
+#title>:last-child,#lobby>:last-child,#result>:last-child{margin-bottom:auto}
+#lobby .lplist{flex:0 1 auto;min-height:44px;overflow-y:auto}
+/* 探索・バトルは画面にぴったり固定 */
+#explore,#battle{inset:auto;top:0;left:0;right:0;height:var(--app-h);padding:0}
+/* HUD 内のボタンが押せない不具合の修正（親の pointer-events:none を継承していた） */
+.hud .hbtns,.hud .hbtns *{pointer-events:auto}
+.hbtns{display:flex;gap:6px;align-items:center}
+.exitbtn{background:rgba(255,77,109,.18)!important;border-color:rgba(255,77,109,.55)!important;color:#ffd0d8}
+.btn.danger{background:linear-gradient(135deg,#ff4d6d,#c9184a);border:none;box-shadow:0 8px 24px rgba(255,77,109,.3)}
+/* 選択フェーズ：リストだけ内部スクロール */
+#select{padding-bottom:calc(10px + env(safe-area-inset-bottom));gap:8px}
+.seltop{display:flex;justify-content:flex-end;gap:6px}
+#select .selgrid{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 2px}
+.selfoot{position:static;margin:0;padding:6px 0 0;background:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.modal{padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
+.modal-card{max-height:calc(var(--app-h) - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch}
+.hudbag .lbl{margin-right:2px}
+/* 縦が短い画面（iPhone の Safari 表示領域など） */
+@media(max-height:760px){
+  #title{gap:10px}
+  .logo-kanji span{width:38px;height:38px;font-size:20px;border-radius:10px}
+  .logo{font-size:clamp(28px,6.2vh,48px)}
+  .title-mons img{width:32px;height:32px}
+  .title-box{gap:9px;margin-top:0}
+  .btn{padding:12px 16px;font-size:16px;border-radius:14px}
+  .inp{padding:10px 14px;font-size:17px}
+  .inp.code{font-size:24px}
+  .field{gap:4px}
+  .err{min-height:14px;font-size:12px}
+  #lobby{gap:10px}
+  .codebox{padding:10px}
+  .codebig{font-size:clamp(32px,10vw,44px)}
+  .lpl{padding:8px 12px}
+  .rbig{font-size:clamp(48px,14vw,80px)}
+}
+@media(max-height:640px){
+  .title-mons,.flow,.logo small{display:none}
+  .logo-kanji{margin-bottom:2px}
+  .sub{font-size:12px}
+  #selSub{line-height:1.5;max-height:3em;overflow:hidden}
+  .selc{padding:8px 6px;gap:2px}
+  .selc .ava{width:40px;height:40px}
+  .selc .pn{display:none}
+  .selc .slist{gap:3px 8px;font-size:11px}
+  .selgrid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+  .sslot{min-height:40px;padding:4px 6px}
+  /* バトル */
+  .mv{padding:6px 4px} .mv-h{font-size:24px} .mv b{font-size:12px} .mv em{display:none}
+  .bstat .badges{min-height:0}
+  .hpwrap{height:11px;margin:4px 0 3px}
+  .bbar .mini{padding:5px 10px;font-size:12px}
+}
+@media(max-height:500px){
+  .logo-kanji{display:none}
+  #blog{height:96px;flex-basis:min(32%,340px)}
+  .mv small{display:none}
+  .bstat{padding:5px 8px}
+  .bstat .ub-head .who{display:none}
+  #bpanel{padding:6px}
+}
+@media(max-width:420px){
+  .hudbag .lbl{display:none}
+  .hudbag{padding:7px 10px}
+  .h2{font-size:19px}
+}
 </style>
 <script src="/socket.io/socket.io.js"></script>
 </head>
@@ -476,7 +556,7 @@ body.touch .keyhelp{display:none}
   <p class="lnote" id="lobbyNote"></p>
   <button class="btn primary" id="startGameBtn">ゲーム開始！</button>
   <button class="btn" data-rules>あそびかた</button>
-  <button class="btn" id="leaveBtn">退出する</button>
+  <button class="btn exitbtn" id="leaveBtn">🚪 退出してタイトルへ</button>
 </section>
 
 <!-- ===== 探索フェーズ ===== -->
@@ -495,7 +575,7 @@ body.touch .keyhelp{display:none}
           <span><i class="ball"></i>×<b id="exBall">6</b></span>
         </div>
       </div>
-      <div class="hbtns"><button class="hudbag" id="bagHudBtn">🎒 持ち物 <kbd>I</kbd></button><button class="mini" id="menuBtn">☰</button></div>
+      <div class="hbtns"><button class="hudbag" id="bagHudBtn">🎒 <span class="lbl">持ち物</span> <kbd>I</kbd></button><button class="mini" id="menuBtn" aria-label="メニュー">☰</button><button class="mini exitbtn" data-exit aria-label="退出">🚪</button></div>
       <canvas id="mini" width="300" height="226"></canvas>
     </div>
   </div>
@@ -510,6 +590,7 @@ body.touch .keyhelp{display:none}
 
 <!-- ===== 選択フェーズ ===== -->
 <section id="select" class="screen">
+  <div class="seltop"><button class="mini" data-rules>？ あそびかた</button><button class="mini exitbtn" data-exit>🚪 退出</button></div>
   <div class="selhead">
     <div><h2 class="h2" style="text-align:left">出撃メンバー選択</h2></div>
     <div class="seltimer" id="selTime">30<small>秒</small></div>
@@ -532,7 +613,7 @@ body.touch .keyhelp{display:none}
     <div id="btop">
       <div class="bbar">
         <div class="tl"><span id="turnLabel">TURN 1</span><span class="ttimer" id="turnTimer"></span></div>
-        <div class="btns"><button class="mini" id="speedBtn">⏩ x1</button><button class="mini" data-rules>？</button></div>
+        <div class="btns"><button class="mini" id="speedBtn">⏩ x1</button><button class="mini" id="bMenuBtn" aria-label="メニュー">☰</button><button class="mini exitbtn" data-exit>🏳️ リタイア</button></div>
       </div>
       <div class="bstats">
         <div class="bstat enemy unitbar" id="eStat">
@@ -566,7 +647,7 @@ body.touch .keyhelp{display:none}
   <p class="lnote" id="rNote"></p>
   <div class="title-box">
     <button class="btn primary" id="toLobbyBtn">ロビーへ戻る</button>
-    <button class="btn" id="exitBtn">退出してタイトルへ</button>
+    <button class="btn exitbtn" id="exitBtn">🚪 退出してタイトルへ</button>
   </div>
 </section>
 
@@ -579,6 +660,19 @@ body.touch .keyhelp{display:none}
    基本ユーティリティ
 ========================================================= */
 const $ = s => document.querySelector(s);
+
+/* iPhone 等：アドレスバーを除いた実際の表示高さを --app-h に反映 */
+function setAppH() {
+  const h = Math.round(window.innerHeight || (window.visualViewport && window.visualViewport.height) || 0);
+  if (h > 0) document.documentElement.style.setProperty('--app-h', h + 'px');
+}
+setAppH();
+window.addEventListener('resize', setAppH);
+window.addEventListener('orientationchange', () => setTimeout(() => { setAppH(); window.dispatchEvent(new Event('resize')); }, 350));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppH);
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -1097,6 +1191,7 @@ function rulesHTML() {
       <li>相手の技の手は見えない。勝った側だけが攻撃、<b>あいこ</b>は両者が威力半分で攻撃。</li>
       <li>🔒 直前のターンに使った技は次のターン使えない。</li>
       <li>何が起きたかは<b>左下のバトルログ</b>で確認（青＝味方／赤＝相手）。</li>
+      <li>🏳️リタイア／🚪退出ボタンで、いつでもパスワード入力画面に戻れます（バトル中は負け扱い）。</li>
     </ul>
     <h3>⑦ 状態異常</h3>
     <ul>${Object.values(STATUS).map(s => `<li>${s.ic} <b>${s.n}</b>：${s.desc}</li>`).join('')}</ul>
@@ -1306,16 +1401,48 @@ function renderLobby() {
   $('#lobbyNote').innerHTML = note;
 }
 $('#startGameBtn').addEventListener('click', () => socket.emit('startGame'));
-$('#leaveBtn').addEventListener('click', leaveToTitle);
-function leaveToTitle() {
+$('#leaveBtn').addEventListener('click', () => leaveToTitle('ルームから退出しました'));
+function leaveToTitle(msg) {
   socket.emit('leave');
   stopExplore();
   stopStage();
   clearInterval(SEL.timer);
+  clearInterval(BV.timer);
+  BV.gen++;
+  BV.q = Promise.resolve();
+  BV.selItem = null;
   S.lobby = null;
+  for (const k in keys) keys[k] = false;
   closeModal();
+  $('#bigMsg').classList.remove('show');
+  if (S.code) $('#codeIn').value = S.code;
+  $('#joinErr').textContent = '';
   show('title');
+  if (msg) toast(msg);
 }
+/* どの画面からでも退出（バトル中はリタイア＝負け扱い） */
+async function confirmExit() {
+  if (BAG.open) closeModal(null);
+  const ph = S.phase;
+  const body = ph === 'battle'
+    ? 'バトルをリタイアしてルームから退出しますか？<br><b style="color:#ff9aa8">このバトルは負け扱い</b>になります。'
+    : ph === 'explore' || ph === 'select'
+      ? 'ゲームから退出しますか？<br>集めたパチモンとアイテムは<b style="color:#ff9aa8">失われます</b>。'
+      : 'ルームから退出しますか？';
+  const v = await modal(`<h2 class="h2">${ph === 'battle' ? '🏳️ リタイア' : '🚪 退出'}</h2>
+    <p class="sub" style="margin:10px 0 4px;font-size:14px">${body}</p>
+    <p class="sub">退出後はパスワード入力画面に戻ります。</p>
+    <button class="btn primary" data-v="stay">続ける</button>
+    <button class="btn danger" data-v="leave">${ph === 'battle' ? 'リタイアして退出' : '退出する'}</button>`);
+  if (v === 'leave') leaveToTitle(ph === 'battle' ? 'バトルをリタイアしました' : 'ルームから退出しました');
+}
+/* ボタンはイベント委譲でまとめて処理（動的に作られたボタンでも確実に反応） */
+document.addEventListener('click', e => {
+  const ex = e.target.closest('[data-exit]');
+  if (ex) { e.preventDefault(); confirmExit(); return; }
+  const ru = e.target.closest('[data-rules]');
+  if (ru && !ru.closest('#modal')) { e.preventDefault(); if (BAG.open) closeModal(null); modal(rulesHTML()); }
+});
 
 /* =========================================================
    探索フェーズ
@@ -1476,7 +1603,7 @@ const MOVE_KEYS = { KeyW: [0, -1], ArrowUp: [0, -1], KeyS: [0, 1], ArrowDown: [0
 window.addEventListener('keydown', e => {
   if (S.phase !== 'explore') return;
   if (MOVE_KEYS[e.code] || e.code === 'KeyK' || e.code === 'KeyO' || e.code === 'Space') e.preventDefault();
-  if (e.code === 'Escape') { if (!modalOpen()) openMenu(); return; }
+  if (e.code === 'Escape') { if (BAG.open) closeModal(null); else if (!modalOpen()) openMenu(); return; }
   if (modalOpen()) return;
   keys[e.code] = true;
   if (e.repeat) return;
@@ -1568,11 +1695,11 @@ async function openMenu() {
     <button class="btn" data-v="bag">🎒 持ち物（I）</button>
     <button class="btn" data-v="rules">あそびかた</button>
     ${isHost ? '<button class="btn" data-v="end">（ホスト）全員の探索を終了する</button>' : ''}
-    <button class="btn" data-v="leave">ルームから退出する</button>`);
+    <button class="btn exitbtn" data-v="leave">🚪 ルームから退出する</button>`);
   if (v === 'bag') openBag();
   else if (v === 'rules') modal(rulesHTML());
   else if (v === 'end') socket.emit('hostEndExplore');
-  else if (v === 'leave') leaveToTitle();
+  else if (v === 'leave') confirmExit();
 }
 $('#bagHudBtn').addEventListener('click', () => openBag());
 
@@ -2251,7 +2378,7 @@ function clearHands() { BA.hands = { p: null, e: null }; }
 const BV = {
   me: 'a', opp: 'b', names: {}, colors: null, teams: { a: [], b: [] }, snap: null, cpu: false,
   anim: false, submitted: false, over: false, needSwitch: false, waitSwitch: false,
-  turn: 1, turnEnd: 0, selItem: null, q: Promise.resolve(), result: null, reason: null, timer: 0, oppReady: false
+  turn: 1, turnEnd: 0, selItem: null, q: Promise.resolve(), result: null, reason: null, timer: 0, oppReady: false, gen: 0
 };
 
 function unitView(sk) {
@@ -2268,6 +2395,8 @@ function unitView(sk) {
 socket.on('battleStart', async d => {
   clearInterval(SEL.timer);
   closeModal();
+  BV.gen++;
+  const gen = BV.gen;
   const me = d.me, opp = me === 'a' ? 'b' : 'a';
   Object.assign(BV, {
     me, opp, names: d.names, colors: d.colors, cpu: d.cpu,
@@ -2297,7 +2426,7 @@ socket.on('battleStart', async d => {
     <div class="enemyrow">${oppTeam.map(c => hiddenMiniCard(c)).join('')}</div>
     <p class="sub">あなた：${BV.teams[BV.me].map((c, i) => `${POS[i]} ${c.name}`).join(' / ')}</p>
     <button class="btn primary" data-v="go">いざ、勝負！</button>`, false);
-  if (S.phase !== 'battle') return;
+  if (S.phase !== 'battle' || gen !== BV.gen) return;
   BA.mon.p.enter = 1; BA.mon.e.enter = 1;
   setBanner('BATTLE START!', '#ffd166', 1.2);
   log('⚔️ バトル開始！', 'turn');
@@ -2323,6 +2452,7 @@ socket.on('turnResult', d => {
     if (S.phase !== 'battle') return;
     BV.anim = true; renderControls();
     await playEvents(d.events);
+    if (S.phase !== 'battle') return;
     BV.submitted = false; BV.oppReady = false;
     BV.anim = false;
     BV.turnEnd = recv + d.left;
@@ -2347,6 +2477,7 @@ socket.on('switchResult', d => {
     if (S.phase !== 'battle') return;
     BV.anim = true; renderControls();
     await playEvents(d.events);
+    if (S.phase !== 'battle') return;
     BV.anim = false; BV.waitSwitch = false;
     BV.turnEnd = recv + d.left;
     renderBattle();
@@ -2354,7 +2485,9 @@ socket.on('switchResult', d => {
 });
 
 async function playEvents(events) {
+  const gen = BV.gen;
   for (const e of events) {
+    if (gen !== BV.gen || S.phase !== 'battle') return;
     if (e.snap) BV.snap = e.snap;
     const sk = e.side ? (e.side === BV.me ? 'p' : 'e') : null;
     switch (e.t) {
@@ -2550,6 +2683,22 @@ $('#moves').addEventListener('click', e => {
   renderControls();
 });
 $('#bagBtn').addEventListener('click', () => openBag());
+async function openBattleMenu() {
+  if (S.phase !== 'battle') return;
+  if (BAG.open) closeModal(null);
+  const v = await modal(`<h2 class="h2">☰ メニュー</h2>
+    <button class="btn primary" data-v="back">バトルに戻る</button>
+    <button class="btn" data-v="bag">🎒 持ち物（I）</button>
+    <button class="btn" data-v="speed">⏩ 演出速度：x${S.speed}（タップで切替）</button>
+    <button class="btn" data-v="rules">あそびかた</button>
+    <button class="btn exitbtn" data-v="exit">🏳️ リタイアして退出</button>`);
+  if (v === 'bag') openBag();
+  else if (v === 'speed') { $('#speedBtn').click(); openBattleMenu(); }
+  else if (v === 'rules') modal(rulesHTML());
+  else if (v === 'exit') confirmExit();
+}
+$('#bMenuBtn').addEventListener('click', () => openBattleMenu());
+window.addEventListener('keydown', e => { if (e.code === 'Escape' && S.phase === 'battle' && !modalOpen()) openBattleMenu(); });
 $('#speedBtn').addEventListener('click', () => {
   S.speed = S.speed === 1 ? 2 : S.speed === 2 ? 3 : 1;
   $('#speedBtn').textContent = `⏩ x${S.speed}`;
@@ -2566,6 +2715,7 @@ $('#speedBtn').addEventListener('click', () => {
    リザルト
 ========================================================= */
 function showResult() {
+  if (S.phase !== 'battle') return;
   clearInterval(BV.timer);
   stopStage();
   const kind = BV.result || 'draw';
@@ -2576,7 +2726,7 @@ function showResult() {
   const alive = d.u.filter(u => u.hp > 0).length;
   const opp = esc(BV.names[BV.opp]);
   $('#rSub').innerHTML = BV.reason === 'left'
-    ? `${opp} が退出したため、不戦勝！`
+    ? `${opp} がリタイアしたため、不戦勝！`
     : kind === 'win' ? `${opp} に勝利！<br>${BV.turn}ターンで決着（生存 ${alive}体）`
     : kind === 'lose' ? `${opp} に敗北…<br>${BV.turn}ターン目に力尽きた` : '両軍、全滅…！';
   $('#rTeam').innerHTML = BV.teams[BV.me].map((c, i) => `<span class="${d.u[i].hp <= 0 ? 'dead' : ''}"><img src="${thumb(c.id)}" alt="" style="width:46px;height:46px"></span>`).join('');
@@ -2589,9 +2739,8 @@ function updateResultNote() {
   $('#rNote').textContent = d && d.phase !== 'lobby' ? '他のプレイヤーがまだバトル中です。終わり次第、次のゲームを始められます。' : 'ロビーに戻って、もう一度冒険しよう！';
 }
 $('#toLobbyBtn').addEventListener('click', () => { show('lobby'); renderLobby(); socket.emit('lobbyState'); });
-$('#exitBtn').addEventListener('click', leaveToTitle);
+$('#exitBtn').addEventListener('click', () => leaveToTitle('ルームから退出しました'));
 
-document.querySelectorAll('[data-rules]').forEach(b => b.addEventListener('click', () => { if (!modalOpen()) modal(rulesHTML()); }));
 </script>
 </body>
 </html>
