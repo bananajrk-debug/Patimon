@@ -217,7 +217,7 @@ function cleanupRoom(room) {
   for (const B of room.battles || []) clearTimeout(B.timer);
 }
 
-function leaveRoom(socket) {
+function leaveRoom(socket, retire) {
   const code = socket.data.room;
   if (!code) return;
   socket.data.room = null;
@@ -229,7 +229,8 @@ function leaveRoom(socket) {
   if (room.players.size === 0) { cleanupRoom(room); rooms.delete(code); return; }
   if (room.hostId === socket.id) room.hostId = room.players.keys().next().value;
   if (p) {
-    io.to(code).emit('toast', { text: `${p.name} が退出しました`, cls: 'warn' });
+    const inBattle = p.battle && !p.battle.over;
+    io.to(code).emit('toast', { text: inBattle ? `🏳️ ${p.name} がリタイアしました` : `🚪 ${p.name} が退出しました`, cls: 'warn' });
     if (p.battle && !p.battle.over) battleForfeit(p.battle, p.id);
   }
   if (room.phase === 'select' && [...room.players.values()].every(q => q.selected)) finishSelect(room);
@@ -1000,7 +1001,7 @@ function battleForfeit(B, leaverId) {
   B.over = true;
   clearTimeout(B.timer);
   B.ev = [];
-  say(B, `${B.sides[lk].name} が退出したため、バトル終了！`, 'sys', 600);
+  say(B, `${B.sides[lk].name} がリタイアしたため、バトル終了！`, 'sys', 600);
   ev(B, { t: 'end', winner: wk, turn: B.turn, reason: 'left' });
   if (!B.sides[wk].cpu) io.to(B.sides[wk].pid).emit('turnResult', { events: maskEvents(B.ev, wk), needSwitch: false, left: 0 });
   finishBattle(B);
@@ -1048,7 +1049,7 @@ io.on('connection', socket => {
     socket.to(code).emit('toast', { text: `${name} が入室しました`, cls: 'item' });
   });
 
-  socket.on('leave', () => leaveRoom(socket));
+  socket.on('leave', () => leaveRoom(socket, true));
 
   socket.on('lobbyState', () => {
     const { room } = ctxOf(socket);
