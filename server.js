@@ -1,3 +1,8 @@
+// Googleなどの検索ロボットのアクセスを全面的に許可する設定
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain');
+  res.send("User-agent: *\nAllow: /");
+});
 const express = require('express');
 const http = require('http');
 const path = require('path');
