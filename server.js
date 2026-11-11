@@ -1,1196 +1,440 @@
-'use strict';
-/* =========================================================
-   パチットモンスター 〜風林火山〜  マルチプレイサーバー
-   Express + Socket.io
-========================================================= */
+// ===== アリ・サバイバル サーバー =====
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const { Server } = require('socket.io');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { pingInterval: 10000, pingTimeout: 20000 });
-const PORT = process.env.PORT || 3000;
-
-app.disable('x-powered-by');
-app.get('/healthz', (req, res) => res.json({ status: 'ok', rooms: rooms.size, time: new Date().toISOString() }));
+const io = new Server(server);
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.use((req, res) => res.status(404).send('Not Found'));
 
-/* =========================================================
-   定数
-========================================================= */
-const EXPLORE_MS = 3 * 60 * 1000;
-const CHEST_COUNT = 5;
-const BALL_DROP_RATE = 0.10;
-const SELECT_MS = 30 * 1000;
-const TURN_MS = 60 * 1000;
-const SWITCH_MS = 30 * 1000;
-const STORM_TURN = 30;
-const TICK_MS = 1000 / 15;
-const WORLD = { w: 3200, h: 2400 };
-const MAX_PLAYERS = 8;
-const PLAYER_COLORS = ['#4dc3ff', '#ff8a3d', '#3ee089', '#c77dff', '#ffd166', '#ff4d6d', '#7cf7ff', '#b6f26b'];
+// ---- 定数 ----
+const W = 3000, H = 2200;
+const NEST = { x: W / 2, y: H / 2, r: 70 };
+const TICK = 30, DT = 1 / TICK;
+const DAY_LEN = 150, NIGHT_LEN = 60;        // 秒
+const MAX_CARRY = 5;
+const FOOD_TARGET = 90;
+const MAX_WORKERS = 25;
+const HATCH_COST = 8, REPAIR_COST = 5;
+const COLORS = ['#c0392b', '#2c3e50', '#8e44ad', '#d35400', '#16a085', '#7f5a2a', '#2980b9', '#b03a7a'];
 
-const rnd = (a, b) => a + Math.random() * (b - a);
-const pick = a => a[Math.floor(Math.random() * a.length)];
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const num = (v, d = 0) => (typeof v === 'number' && isFinite(v) ? v : d);
-const shuffle = a => { const b = a.slice(); for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
-
-/* =========================================================
-   ゲームデータ
-========================================================= */
-const STATUS = {
-  poison:   { n: '毒',   ic: '☠️', turns: 4, cls: 'st-poison', desc: 'ターン終了時に最大HPの8%ダメージ（4ターン）' },
-  burn:     { n: '火傷', ic: '🔥', turns: 3, cls: 'st-burn',   desc: 'ターン終了時に最大HPの6%ダメージ＋パワー↓（3ターン）' },
-  paralyze: { n: '麻痺', ic: '⚡', turns: 3, cls: 'st-para',   desc: '30%の確率で動けず、じゃんけんに自動で負ける（3ターン）' },
-  confuse:  { n: '混乱', ic: '💫', turns: 3, cls: 'st-conf',   desc: '40%の確率で出す手がランダムに変わる（3ターン）' }
-};
-const ITEMS = {
-  heal:  { n: '回復薬',   ic: '💊', type: '回復', desc: 'HPを40%回復し、状態異常も治す' },
-  power: { n: '攻撃の札', ic: '🔥', type: '攻撃', desc: 'このターンの与ダメージ1.5倍' },
-  guard: { n: 'シールド', ic: '🛡️', type: '防御', desc: 'このターンの被ダメージ半減＋状態異常を防ぐ' }
-};
-const HAND_E = { g: '👊', c: '✌️', p: '✋' };
-const BEATS = { g: 'c', c: 'p', p: 'g' };
-const judge = (a, b) => (a === b ? 0 : (BEATS[a] === b ? 1 : -1));
-const RAR_RANK = { N: 0, R: 1, SR: 2, SSR: 3 };
-/* アイテム所持上限 */
-const ITEM_MAX = { heal: 3, power: 2, guard: 2 };
-
-const CHARS = [
-  { id: 'homura', name: 'ホムラ丸', title: '侵掠すること火の如し', rar: 'R', em: '🦊', el: '火', col: ['#ff5a1f', '#ffb347'],
-    hp: 110, atk: 34, def: 22, spd: 26, beh: 'aggr',
-    passive: { key: 'haisui', name: '背水の陣', desc: 'HPが1/3以下になるとパワーが1.5倍' },
-    moves: [
-      { name: '紅蓮拳', hand: 'g', power: 40, status: { type: 'burn', chance: .3 }, desc: '30%で火傷' },
-      { name: '爆炎ストレート', hand: 'g', power: 58, recoil: .15, desc: '強力だが与ダメの15%反動' },
-      { name: '火の粉', hand: 'c', power: 25, status: { type: 'burn', chance: .6 }, desc: '60%で火傷' }
-    ] },
-  { id: 'kazakiri', name: 'カザキリ', title: '疾きこと風の如し', rar: 'R', em: '🦅', el: '風', col: ['#18c98f', '#7cf7ff'],
-    hp: 95, atk: 31, def: 19, spd: 40, beh: 'timid',
-    passive: { key: 'shippu', name: '疾風', desc: 'あいこの時でも与えるダメージが半減しない' },
-    moves: [
-      { name: '鎌鼬', hand: 'c', power: 22, hits: 2, desc: '2回連続で切り裂く' },
-      { name: '追い風', hand: 'p', power: 20, selfBuff: { atk: 1 }, desc: '自分のパワー↑' },
-      { name: '疾風斬', hand: 'c', power: 38, crit: .3, desc: '急所率大幅アップ' }
-    ] },
-  { id: 'shinrin', name: 'シンリン', title: '徐かなること林の如し', rar: 'N', em: '🦌', el: '林', col: ['#2fae3a', '#b6f26b'],
-    hp: 130, atk: 25, def: 27, spd: 20, beh: 'calm',
-    passive: { key: 'regen', name: '森の恵み', desc: '毎ターン終了時にHPを6%回復' },
-    moves: [
-      { name: '葉隠れ', hand: 'p', power: 20, guard: .5, desc: 'このターンの被ダメ50%軽減' },
-      { name: '吸精の蔓', hand: 'p', power: 32, drain: .5, desc: '与ダメの50%を吸収' },
-      { name: '根張り', hand: 'g', power: 25, selfBuff: { def: 1 }, desc: '自分の防御↑' }
-    ] },
-  { id: 'ganzan', name: 'ガンザン', title: '動かざること山の如し', rar: 'SR', em: '🐢', el: '山', col: ['#8a6440', '#e0c08a'],
-    hp: 150, atk: 29, def: 34, spd: 12, beh: 'aggr',
-    passive: { key: 'teppeki', name: '岩の鎧', desc: '受けるダメージを常に15%カット' },
-    moves: [
-      { name: '岩砕き', hand: 'g', power: 42, foeDebuff: { def: -1 }, desc: '相手の防御↓' },
-      { name: '山崩し', hand: 'g', power: 62, desc: '山をも崩す重い一撃' },
-      { name: '不動の構え', hand: 'p', power: 12, guard: .7, counter: .5, desc: '被ダメ70%軽減・負けたら50%反射' }
-    ] },
-  { id: 'raijin', name: 'ライジン', title: '轟くこと雷の如し', rar: 'SR', em: '🐯', el: '雷', col: ['#ffb700', '#fff38a'],
-    hp: 100, atk: 36, def: 21, spd: 34, beh: 'aggr',
-    passive: { key: 'taiden', name: '帯電', desc: '攻撃を当てると20%で相手を麻痺させる' },
-    moves: [
-      { name: '雷鳴斬', hand: 'c', power: 40, status: { type: 'paralyze', chance: .3 }, desc: '30%で麻痺' },
-      { name: '迅雷掌', hand: 'p', power: 34, status: { type: 'paralyze', chance: .25 }, desc: '25%で麻痺' },
-      { name: '万雷', hand: 'g', power: 64, recoil: .2, desc: '超威力だが与ダメの20%反動' }
-    ] },
-  { id: 'dokuron', name: 'ドクロン', title: '蝕むこと毒の如し', rar: 'N', em: '🐍', el: '毒', col: ['#7b2cbf', '#d48bff'],
-    hp: 115, atk: 27, def: 24, spd: 27, beh: 'aggr',
-    passive: { key: 'dokutai', name: '毒の体', desc: '毒状態の相手へのダメージが1.3倍' },
-    moves: [
-      { name: '毒牙', hand: 'c', power: 30, status: { type: 'poison', chance: .7 }, desc: '70%で毒' },
-      { name: '蝕み', hand: 'c', power: 22, foeDebuff: { atk: -1 }, status: { type: 'poison', chance: .3 }, desc: '相手のパワー↓・30%で毒' },
-      { name: 'ヘドロ波', hand: 'p', power: 36, status: { type: 'poison', chance: .4 }, desc: '40%で毒' }
-    ] },
-  { id: 'mizuchi', name: 'ミズチ', title: '流るること水の如し', rar: 'R', em: '🐲', el: '水', col: ['#1f6bff', '#6fd3ff'],
-    hp: 120, atk: 29, def: 26, spd: 29, beh: 'calm',
-    passive: { key: 'seiryu', name: '清流', desc: '状態異常の継続ターンが半分になる' },
-    moves: [
-      { name: '激流', hand: 'p', power: 46, desc: '激しい水流で押し流す' },
-      { name: '水鏡', hand: 'g', power: 15, counter: .6, desc: '負けた時、受けたダメージの60%を反射' },
-      { name: '霧隠れ', hand: 'c', power: 22, status: { type: 'confuse', chance: .5 }, desc: '50%で混乱' }
-    ] },
-  { id: 'tsukuyomi', name: 'ツクヨミ', title: '朧なること月の如し', rar: 'SSR', em: '🐇', el: '月', col: ['#8f7bff', '#f0ecff'],
-    hp: 115, atk: 38, def: 28, spd: 36, beh: 'timid',
-    passive: { key: 'mikiri', name: '見切り', desc: '25%の確率で相手の攻撃を完全回避' },
-    moves: [
-      { name: '月光', hand: 'p', power: 30, heal: .25, desc: '攻撃しつつ最大HPの25%回復' },
-      { name: '朧月', hand: 'c', power: 48, status: { type: 'confuse', chance: .3 }, desc: '30%で混乱' },
-      { name: '満月砕き', hand: 'g', power: 66, desc: '満月の力で粉砕する' }
-    ] },
-  { id: 'maneki', name: 'マネキネコ', title: '招くこと福の如し', rar: 'N', em: '🐱', el: '金', col: ['#ffb703', '#fff2b0'],
-    hp: 105, atk: 26, def: 22, spd: 31, beh: 'timid',
-    passive: { key: 'shofuku', name: '招福', desc: '急所率+20%' },
-    moves: [
-      { name: '小判投げ', hand: 'p', power: 32, crit: .2, desc: '急所率アップ' },
-      { name: '招き手', hand: 'p', power: 20, foeDebuff: { atk: -1 }, desc: '相手のパワー↓' },
-      { name: '猫パンチ', hand: 'g', power: 38, desc: 'すばやい一撃' }
-    ] },
-  { id: 'shingen', name: 'シンゲン', title: '風林火山の大将', rar: 'SSR', em: '🦁', el: '将', col: ['#e0103a', '#ffd166'],
-    hp: 135, atk: 35, def: 30, spd: 28, beh: 'aggr',
-    passive: { key: 'furinkazan', name: '風林火山', desc: 'あらゆる状態異常にかからない' },
-    moves: [
-      { name: '疾風の号令', hand: 'c', power: 36, selfBuff: { atk: 1 }, desc: '攻撃しつつ自分のパワー↑' },
-      { name: '静林の陣', hand: 'p', power: 20, guard: .5, heal: .15, desc: '被ダメ50%軽減・HP15%回復' },
-      { name: '侵掠如火', hand: 'g', power: 55, status: { type: 'burn', chance: .3 }, desc: '30%で火傷' }
-    ] }
+// 食べ物タイプ（index順でクライアントに送る）
+const FOOD_TYPES = [
+  { name: 'crumb', v: 1, r: 6 },   // パンくず
+  { name: 'seed',  v: 2, r: 8 },   // 種
+  { name: 'sugar', v: 5, r: 12 },  // 角砂糖（手ぶらの時だけ運べる）
+  { name: 'meat',  v: 2, r: 9 },   // 虫の肉（敵を倒すと出る）
 ];
-const CHAR_MAP = Object.fromEntries(CHARS.map(c => [c.id, c]));
+const ENEMY = {
+  spider: { hp: 40, spd: 135, dmg: 10, r: 22, detect: 320, drop: 2 },
+  beetle: { hp: 90, spd: 70,  dmg: 18, r: 26, detect: 220, drop: 3 },
+};
 
-function rollRarity(ssrRate = 5) {
-  const r = Math.random() * 100;
-  if (r < ssrRate) return 'SSR';
-  if (r < ssrRate + 15) return 'SR';
-  if (r < ssrRate + 49) return 'R';
-  return 'N';
-}
-function drawOne(exclude = [], ssrRate = 5) {
-  const rar = rollRarity(ssrRate);
-  let pool = CHARS.filter(c => c.rar === rar && !exclude.includes(c.id));
-  if (!pool.length) pool = CHARS.filter(c => !exclude.includes(c.id));
-  if (!pool.length) pool = CHARS;
-  return pick(pool);
-}
-const totalStat = c => c.hp + c.atk + c.def + c.spd;
+// ---- 状態 ----
+let rocks = [], players = {}, foods = [], enemies = [], workers = [], drops = [];
+let nextId = 1;
+let colony, gameOver = false, best = 0;
 
-/* 個体値：技の手の組み合わせとステータスが個体ごとにランダム */
-function rollInstance(c) {
-  const hands = ['g', 'c', 'p'];
-  let hs = [pick(hands), pick(hands), pick(hands)];
-  if (hs[0] === hs[1] && hs[1] === hs[2] && Math.random() < .7) hs[2] = pick(hands.filter(h => h !== hs[0]));
-  const k = () => rnd(.85, 1.15);
-  const mk = [k(), k(), k(), k()];
-  const avg = mk.reduce((a, b) => a + b, 0) / 4;
-  const stars = clamp(Math.round((avg - .85) / .3 * 4) + 1, 1, 5);
-  return {
-    uid: 'u' + Math.random().toString(36).slice(2, 10), id: c.id, hands: hs,
-    hp: Math.round(c.hp * mk[0]), atk: Math.round(c.atk * mk[1]), def: Math.round(c.def * mk[2]), spd: Math.round(c.spd * mk[3]), stars
-  };
-}
-const instPower = e => e.hp + e.atk * 2 + e.def * 2 + e.spd;
+const rand = (a, b) => a + Math.random() * (b - a);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const msg = (text) => io.emit('msg', text);
 
-/* =========================================================
-   ルーム管理
-========================================================= */
-const rooms = new Map();
-
-function lobbyPayload(room) {
-  return {
-    code: room.code, phase: room.phase, hostId: room.hostId,
-    players: [...room.players.values()].map(p => ({ id: p.id, name: p.name, color: p.color, host: p.id === room.hostId }))
-  };
-}
-function broadcastLobby(room) { io.to(room.code).emit('lobby', lobbyPayload(room)); }
-function ctxOf(socket) {
-  const room = rooms.get(socket.data.room);
-  if (!room) return {};
-  return { room, p: room.players.get(socket.id) };
-}
-function toastTo(id, text, cls = '') { io.to(id).emit('toast', { text, cls }); }
-function sendInv(p) { io.to(p.id).emit('inv', { balls: p.inv.balls, items: p.inv.items, party: p.party, max: ITEM_MAX }); }
-function fx(room, list) { io.to(room.code).emit('fx', list); }
-
-function newPlayer(socket, name, room) {
-  const used = new Set([...room.players.values()].map(p => p.color));
-  const color = PLAYER_COLORS.find(c => !used.has(c)) || pick(PLAYER_COLORS);
-  return {
-    id: socket.id, name, color, x: WORLD.w / 2, y: WORLD.h / 2, dx: 0, dy: 1, sw: 0, stun: false,
-    lastSword: 0, lastThrow: 0,
-    inv: { balls: 6, items: { power: 1, guard: 1, heal: 1 } },
-    party: [], team: null, selected: false, rescued: 0, ready: false,
-    stats: { caught: 0, defeated: 0, chests: 0 }, battle: null
-  };
+function newColony() {
+  return { food: 20, nestHp: 100, maxNestHp: 100, day: 1, time: 0, isNight: false, rain: 0, rainSpawn: 0 };
 }
 
-function cleanupRoom(room) {
-  clearInterval(room.tick);
-  clearTimeout(room.exploreTimer);
-  clearTimeout(room.selectTimer);
-  clearTimeout(room.selectStartTimer);
-  for (const B of room.battles || []) clearTimeout(B.timer);
-}
-
-function leaveRoom(socket, retire) {
-  const code = socket.data.room;
-  if (!code) return;
-  socket.data.room = null;
-  socket.leave(code);
-  const room = rooms.get(code);
-  if (!room) return;
-  const p = room.players.get(socket.id);
-  room.players.delete(socket.id);
-  if (room.players.size === 0) { cleanupRoom(room); rooms.delete(code); return; }
-  if (room.hostId === socket.id) room.hostId = room.players.keys().next().value;
-  if (p) {
-    const inBattle = p.battle && !p.battle.over;
-    io.to(code).emit('toast', { text: inBattle ? `🏳️ ${p.name} がリタイアしました` : `🚪 ${p.name} が退出しました`, cls: 'warn' });
-    if (p.battle && !p.battle.over) battleForfeit(p.battle, p.id);
-  }
-  if (room.phase === 'select' && [...room.players.values()].every(q => q.selected)) finishSelect(room);
-  if (room.phase === 'explore') { io.to(code).emit('readyStatus', readyPayload(room)); checkAllReady(room); }
-  if (room.phase === 'battle') checkAllBattles(room);
-  broadcastLobby(room);
-}
-
-/* =========================================================
-   ワールド生成
-========================================================= */
-function genWorld(room) {
-  const obs = [], chests = [];
-  const cx = WORLD.w / 2, cy = WORLD.h / 2;
-  const nearCenter = (x, y) => Math.hypot(x - cx, y - cy) < 260;
-  for (let k = 0; k < 12; k++) {
-    const fx0 = rnd(200, WORLD.w - 200), fy0 = rnd(200, WORLD.h - 200);
-    if (nearCenter(fx0, fy0)) continue;
-    const n = 5 + Math.floor(Math.random() * 6);
-    for (let i = 0; i < n; i++) {
-      const x = clamp(fx0 + rnd(-140, 140), 40, WORLD.w - 40), y = clamp(fy0 + rnd(-110, 110), 40, WORLD.h - 40);
-      obs.push({ x: Math.round(x), y: Math.round(y), r: 22, s: +rnd(.9, 1.3).toFixed(2), type: 'tree' });
-    }
-  }
-  for (let i = 0; i < 70; i++) {
-    const x = rnd(40, WORLD.w - 40), y = rnd(40, WORLD.h - 40);
-    if (nearCenter(x, y)) continue;
-    const tree = Math.random() < .6;
-    obs.push({ x: Math.round(x), y: Math.round(y), r: tree ? 22 : 18, s: +rnd(.8, 1.25).toFixed(2), type: tree ? 'tree' : 'rock' });
-  }
-  room.obs = obs;
-  room.chests = chests;
-  let guard = 0;
-  const goldIdx = Math.floor(Math.random() * CHEST_COUNT);
-  while (chests.length < CHEST_COUNT && guard++ < 5000) {
-    const x = rnd(120, WORLD.w - 120), y = rnd(120, WORLD.h - 120);
-    if (nearCenter(x, y)) continue;
-    if (obs.some(o => Math.hypot(x - o.x, y - o.y) < o.r * o.s + 50)) continue;
-    if (chests.some(c => Math.hypot(x - c.x, y - c.y) < (guard < 3000 ? 600 : 200))) continue;
-    chests.push({ id: chests.length, x: Math.round(x), y: Math.round(y), open: false, gold: chests.length === goldIdx });
-  }
-  while (chests.length < CHEST_COUNT) {
-    chests.push({ id: chests.length, x: Math.round(rnd(200, WORLD.w - 200)), y: Math.round(rnd(200, WORLD.h - 200)), open: false, gold: false });
-  }
-  room.mons = [];
-  room.balls = [];
-  room.monSeq = 1;
-  room.spawnT = 0;
-}
-
-function freeSpot(room, minPlayerDist) {
-  const ps = [...room.players.values()];
-  for (let i = 0; i < 80; i++) {
-    const x = rnd(80, WORLD.w - 80), y = rnd(80, WORLD.h - 80);
-    if (ps.some(p => Math.hypot(x - p.x, y - p.y) < minPlayerDist)) continue;
-    if (room.obs.some(o => Math.hypot(x - o.x, y - o.y) < o.r * o.s + 40)) continue;
-    if (room.chests.some(c => Math.hypot(x - c.x, y - c.y) < 60)) continue;
-    return { x, y };
-  }
-  return { x: rnd(80, WORLD.w - 80), y: rnd(80, WORLD.h - 80) };
-}
-
-function spawnMon(room, minDist) {
-  const c = drawOne([], 4);
-  const pos = freeSpot(room, minDist);
-  const mh = Math.round(c.hp * .6);
-  room.mons.push({
-    i: room.monSeq++, c, x: pos.x, y: pos.y, hp: mh, mh, state: 'w', t: rnd(0, 2), wx: 0, wy: 0, kx: 0, ky: 0,
-    anger: 0, spd: 50 + c.spd * 2.6, faintT: 0, capT: 0, capChance: 0, capOwner: null, hitCd: 0
-  });
-}
-const monCap = room => Math.min(30, 14 + room.players.size * 3);
-
-function collide(room, e, r) {
-  for (const o of room.obs) {
-    const rr = o.r * o.s * .8 + r;
-    const dx = e.x - o.x, dy = e.y - o.y, d2 = dx * dx + dy * dy;
-    if (d2 < rr * rr) { const d = Math.sqrt(d2) || 1; e.x = o.x + dx / d * rr; e.y = o.y + dy / d * rr; }
-  }
-  for (const c of room.chests) {
-    const rr = 16 + r, cy = c.y - 10;
-    const dx = e.x - c.x, dy = e.y - cy, d2 = dx * dx + dy * dy;
-    if (d2 < rr * rr) { const d = Math.sqrt(d2) || 1; e.x = c.x + dx / d * rr; e.y = cy + dy / d * rr; }
-  }
-  e.x = clamp(e.x, r, WORLD.w - r);
-  e.y = clamp(e.y, r, WORLD.h - r);
-}
-
-/* =========================================================
-   探索フェーズ：開始・進行
-========================================================= */
-function startGame(room) {
-  cleanupRoom(room);
-  room.phase = 'explore';
-  room.battles = [];
-  genWorld(room);
-  const ps = [...room.players.values()];
-  ps.forEach((p, i) => {
-    const a = (i / Math.max(1, ps.length)) * Math.PI * 2;
-    p.x = WORLD.w / 2 + Math.cos(a) * (ps.length > 1 ? 70 : 0);
-    p.y = WORLD.h / 2 + Math.sin(a) * (ps.length > 1 ? 70 : 0);
-    p.dx = 0; p.dy = 1; p.sw = 0; p.stun = false;
-    p.inv = { balls: 6, items: { power: 1, guard: 1, heal: 1 } };
-    p.party = []; p.team = null; p.selected = false; p.rescued = 0; p.battle = null; p.ready = false;
-    p.stats = { caught: 0, defeated: 0, chests: 0 };
-  });
-  const n = monCap(room);
-  for (let i = 0; i < n; i++) spawnMon(room, 380);
-  room.endAt = Date.now() + EXPLORE_MS;
-  const players = ps.map(p => ({ id: p.id, name: p.name, color: p.color }));
-  io.to(room.code).emit('readyStatus', readyPayload(room));
-  for (const p of ps) {
-    io.to(p.id).emit('gameStart', {
-      world: WORLD, obs: room.obs, chests: room.chests, you: { x: p.x, y: p.y },
-      left: EXPLORE_MS, players
-    });
-    sendInv(p);
-  }
-  broadcastLobby(room);
-  room.tick = setInterval(() => tickRoom(room), TICK_MS);
-  room.exploreTimer = setTimeout(() => endExplore(room), EXPLORE_MS);
-}
-
-function hitMon(room, m, p, nx, ny) {
-  const crit = Math.random() < .15;
-  const dmg = Math.round(rnd(17, 25) * (crit ? 1.6 : 1));
-  m.hp = Math.max(0, m.hp - dmg);
-  m.kx = nx * 420; m.ky = ny * 420;
-  if (m.c.beh === 'calm') m.anger = 6;
-  fx(room, [
-    { k: 'pop', x: m.x, y: m.y - 30, s: (crit ? '会心！' : '') + dmg, col: crit ? '#ffd166' : '#ffffff', z: crit ? 22 : 18 },
-    { k: 'burst', x: m.x, y: m.y, col: '#ffffff', n: 8, sp: 140 },
-    { k: 'flash', i: m.i }
-  ]);
-  if (m.hp <= 0) defeatMon(room, m, p);
-}
-
-function defeatMon(room, m, p) {
-  p.stats.defeated++;
-  fx(room, [{ k: 'burst', x: m.x, y: m.y, col: m.c.col[0], n: 22, sp: 220 }]);
-  if (Math.random() < .25) {
-    room.mons.splice(room.mons.indexOf(m), 1);
-    giveMon(room, p, m.c, `${m.c.em} ${m.c.name} は仲間になりたそうにこちらを見ている… 仲間に加わった！`);
-  } else {
-    m.state = 'f'; m.faintT = 8; m.kx *= .3; m.ky *= .3;
-    fx(room, [{ k: 'pop', x: m.x, y: m.y - 46, s: '気絶！ボールで確定GET', col: '#ffd166', z: 14 }]);
-  }
-  if (Math.random() < BALL_DROP_RATE) {
-    p.inv.balls++;
-    sendInv(p);
-    fx(room, [{ k: 'pop', x: m.x, y: m.y - 62, s: 'パチボール +1', col: '#ff8fab', z: 15 }]);
-    toastTo(p.id, '✨ パチボールを拾った！（+1）', 'item');
+function genRocks() {
+  rocks = [];
+  let tries = 0;
+  while (rocks.length < 45 && tries < 2000) {
+    tries++;
+    const r = rand(30, 90);
+    const x = rand(r, W - r), y = rand(r, H - r);
+    if (Math.hypot(x - NEST.x, y - NEST.y) < NEST.r + r + 140) continue;
+    if (rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 50)) continue;
+    rocks.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
   }
 }
+const insideRock = (x, y, pad) => rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + pad);
 
-function giveMon(room, p, c, msg) {
-  const inst = rollInstance(c);
-  p.party.push(inst);
-  p.stats.caught++;
-  sendInv(p);
-  toastTo(p.id, msg || `🎉 ${c.name}（${c.rar}）をゲットした！`, c.rar === 'SSR' ? 'get ssr' : 'get');
-  if (RAR_RANK[c.rar] >= 2) {
-    for (const q of room.players.values()) if (q.id !== p.id) toastTo(q.id, `📣 ${p.name} が ${c.rar} ${c.em}${c.name} をゲット！`, 'item');
+function resolve(e, rad) {
+  for (const o of rocks) {
+    const dx = e.x - o.x, dy = e.y - o.y, d = Math.hypot(dx, dy), min = o.r + rad;
+    if (d < min && d > 0.001) { e.x = o.x + dx / d * min; e.y = o.y + dy / d * min; }
   }
+  e.x = clamp(e.x, rad, W - rad);
+  e.y = clamp(e.y, rad, H - rad);
 }
 
-function giveChest(room, p, c) {
-  const n = c.gold ? 4 : 2;
-  const got = { heal: 0, power: 0, guard: 0 };
-  let lost = 0;
+// ---- 食べ物 ----
+function spawnFood(t, x, y) {
+  foods.push({ id: nextId++, t, x, y, r: FOOD_TYPES[t].r, v: FOOD_TYPES[t].v });
+}
+function spawnFoodCluster() {
+  let x, y, tries = 0;
+  do {
+    x = rand(40, W - 40); y = rand(40, H - 40); tries++;
+  } while ((insideRock(x, y, 30) || Math.hypot(x - NEST.x, y - NEST.y) < 250) && tries < 50);
+  const roll = Math.random();
+  const t = roll < 0.6 ? 0 : roll < 0.9 ? 1 : 2;
+  const n = t === 2 ? 1 : 3 + Math.floor(Math.random() * 4);
   for (let i = 0; i < n; i++) {
-    // 上限に達していないアイテムから抽選（全部満タンなら持ちきれない）
-    const room4 = Object.keys(ITEM_MAX).filter(k => p.inv.items[k] < ITEM_MAX[k]);
-    if (!room4.length) { lost++; continue; }
-    const r = Math.random();
-    let k = r < .4 ? 'heal' : r < .7 ? 'power' : 'guard';
-    if (!room4.includes(k)) k = pick(room4);
-    got[k]++; p.inv.items[k]++;
+    const fx = clamp(x + rand(-40, 40), 20, W - 20), fy = clamp(y + rand(-40, 40), 20, H - 20);
+    if (!insideRock(fx, fy, 10)) spawnFood(t, fx, fy);
   }
-  sendInv(p);
-  const text = Object.keys(got).filter(k => got[k]).map(k => `${ITEMS[k].ic}${ITEMS[k].n}×${got[k]}`).join(' ');
-  fx(room, [{ k: 'pop', x: c.x, y: c.y - 46, s: c.gold ? '金の宝箱！' : 'アイテムGET', col: '#7cf7ff', z: 15 }]);
-  if (text) toastTo(p.id, `📦 ${c.gold ? '金の宝箱' : '宝箱'}から ${text} を手に入れた！`, 'item');
-  if (lost) toastTo(p.id, `🎒 持ち物がいっぱいで、${lost}個は持ちきれなかった…（I で持ち物を確認）`, 'warn');
-  for (const q of room.players.values()) if (q.id !== p.id) toastTo(q.id, `📦 ${p.name} が宝箱を開けた（残り ${room.chests.filter(x => !x.open).length}個）`, '');
 }
 
-function startCapture(m, ownerId) {
-  const base = { N: .65, R: .45, SR: .3, SSR: .18 }[m.c.rar];
-  m.capChance = m.state === 'f' ? 1 : Math.min(.95, base * (1 + (1 - m.hp / m.mh) * 1.6));
-  m.state = 'c'; m.capT = 1.5; m.kx = m.ky = 0; m.capOwner = ownerId;
+// ---- プレイヤー ----
+function spawnPlayer(p) {
+  p.x = NEST.x + rand(-30, 30); p.y = NEST.y + rand(-30, 30);
+  p.hp = 100; p.hunger = 100; p.carry = 0; p.dead = false; p.respawn = 0;
+}
+function killPlayer(p, why) {
+  p.dead = true; p.respawn = 5;
+  for (let i = 0; i < p.carry; i++) spawnFood(0, p.x + rand(-20, 20), p.y + rand(-20, 20));
+  p.carry = 0;
+  msg(`${p.name} が${why}`);
 }
 
-function resolveCapture(room, m) {
-  const owner = room.players.get(m.capOwner);
-  if (owner && Math.random() < m.capChance) {
-    room.mons.splice(room.mons.indexOf(m), 1);
-    fx(room, [
-      { k: 'burst', x: m.x, y: m.y, col: '#ffd166', n: 26, sp: 240 },
-      { k: 'pop', x: m.x, y: m.y - 34, s: 'GET!!', col: '#ffd166', z: 24 }
-    ]);
-    giveMon(room, owner, m.c);
-  } else {
-    m.state = 'w';
-    if (m.hp <= 0) m.hp = Math.ceil(m.mh * .3);
-    m.anger = m.c.beh === 'timid' ? 0 : 5;
-    fx(room, [
-      { k: 'burst', x: m.x, y: m.y, col: '#ffffff', n: 18, sp: 220 },
-      { k: 'pop', x: m.x, y: m.y - 34, s: '逃げられた！', col: '#ff9aa8', z: 16 }
-    ]);
-    if (owner) toastTo(owner.id, `${m.c.em} ${m.c.name} はボールから飛び出した！`, 'warn');
+function handleAction(p, type) {
+  if (!p || p.dead || gameOver) return;
+  const atNest = dist(p, NEST) < NEST.r;
+  if (type === 'bite') {
+    if (p.biteCd > 0) return;
+    p.biteCd = 0.35; p.biteAnim = 0.15;
+    const fx = p.x + Math.cos(p.a) * 22, fy = p.y + Math.sin(p.a) * 22;
+    for (const e of enemies) {
+      if (Math.hypot(e.x - fx, e.y - fy) < e.r + 18) {
+        e.hp -= 12; e.hitT = 0.15;
+        const kd = Math.atan2(e.y - p.y, e.x - p.x);
+        e.x += Math.cos(kd) * 10; e.y += Math.sin(kd) * 10;
+        if (e.hp <= 0) killEnemy(e, p);
+      }
+    }
+  } else if (type === 'eat') {
+    if (p.hunger >= 99) return;
+    if (p.carry > 0) { p.carry--; p.hunger = Math.min(100, p.hunger + 20); }
+    else if (atNest && colony.food >= 1) { colony.food--; p.hunger = Math.min(100, p.hunger + 20); }
+  } else if (type === 'hatch') {
+    if (atNest && colony.food >= HATCH_COST && workers.length < MAX_WORKERS) {
+      colony.food -= HATCH_COST;
+      workers.push({ id: nextId++, x: NEST.x, y: NEST.y, a: rand(0, 6.28), hp: 20, carry: 0, target: null, wt: 0 });
+      msg(`${p.name} が働きアリを誕生させた！（${workers.length}匹）`);
+    }
+  } else if (type === 'repair') {
+    if (atNest && colony.food >= REPAIR_COST && colony.nestHp < colony.maxNestHp) {
+      colony.food -= REPAIR_COST;
+      colony.nestHp = Math.min(colony.maxNestHp, colony.nestHp + 15);
+    }
   }
-  m.capOwner = null;
 }
 
-function tickRoom(room) {
-  if (room.phase !== 'explore') return;
-  const dt = TICK_MS / 1000;
-  const ps = [...room.players.values()];
+// ---- 敵 ----
+function spawnEnemy(type, raid) {
+  const s = ENEMY[type];
+  let x, y, tries = 0;
+  do {
+    const side = Math.floor(Math.random() * 4);
+    x = side === 0 ? 30 : side === 1 ? W - 30 : rand(30, W - 30);
+    y = side === 2 ? 30 : side === 3 ? H - 30 : rand(30, H - 30);
+    tries++;
+  } while (insideRock(x, y, s.r) && tries < 20);
+  enemies.push({ id: nextId++, type, x, y, a: 0, hp: s.hp, maxHp: s.hp, raid, atkCd: 0, wa: rand(0, 6.28), wt: 0, hitT: 0 });
+}
+function killEnemy(e, p) {
+  e.dead = true;
+  const s = ENEMY[e.type];
+  for (let i = 0; i < s.drop; i++) spawnFood(3, e.x + rand(-15, 15), e.y + rand(-15, 15));
+  if (p) p.score += e.type === 'spider' ? 3 : 5;
+}
 
-  // 野生パチモン
-  for (let i = room.mons.length - 1; i >= 0; i--) {
-    const m = room.mons[i];
-    m.hitCd = Math.max(0, m.hitCd - dt);
-    if (m.state === 'c') {
-      m.capT -= dt;
-      if (m.capT <= 0) resolveCapture(room, m);
+function updateEnemies() {
+  for (const e of enemies) {
+    if (e.dead) continue;
+    const s = ENEMY[e.type];
+    e.atkCd -= DT; e.hitT -= DT;
+    // ターゲット探し（プレイヤー＋働きアリ）
+    let target = null, best = s.detect;
+    for (const id in players) {
+      const p = players[id];
+      if (p.dead) continue;
+      const d = dist(p, e);
+      if (d < best) { best = d; target = p; }
+    }
+    for (const w of workers) {
+      const d = dist(w, e);
+      if (d < best) { best = d; target = w; }
+    }
+    let tx = null, ty = null;
+    if (target) { tx = target.x; ty = target.y; }
+    else if (e.raid) { tx = NEST.x; ty = NEST.y; }
+
+    if (tx !== null) {
+      const d = Math.hypot(tx - e.x, ty - e.y);
+      e.a = Math.atan2(ty - e.y, tx - e.x);
+      const reach = target ? e.r + 12 : NEST.r + e.r * 0.5;
+      if (d > reach) {
+        e.x += Math.cos(e.a) * s.spd * DT; e.y += Math.sin(e.a) * s.spd * DT;
+      } else if (target && e.atkCd <= 0) {
+        e.atkCd = 1.0;
+        target.hp -= s.dmg;
+        if (target.hp <= 0) {
+          if (target.name !== undefined) killPlayer(target, `${e.type === 'spider' ? 'クモ' : 'カブトムシ'}にやられた…`);
+          else target.dead = true;
+        }
+      } else if (!target) {
+        colony.nestHp -= 4 * DT; // 巣を攻撃
+      }
+    } else {
+      e.wt -= DT;
+      if (e.wt <= 0) { e.wa += rand(-1.5, 1.5); e.wt = rand(1, 3); }
+      e.a = e.wa;
+      e.x += Math.cos(e.wa) * s.spd * 0.35 * DT; e.y += Math.sin(e.wa) * s.spd * 0.35 * DT;
+    }
+    const bx = e.x, by = e.y;
+    resolve(e, e.r * 0.7);
+    if (tx === null && (bx !== e.x || by !== e.y)) e.wa += Math.PI * 0.7;
+  }
+  enemies = enemies.filter(e => !e.dead);
+  workers = workers.filter(w => {
+    if (w.dead || w.hp <= 0) { if (w.carry) spawnFood(0, w.x, w.y); return false; }
+    return true;
+  });
+}
+
+// ---- 働きアリ ----
+function updateWorkers() {
+  for (const w of workers) {
+    let tx, ty;
+    if (w.carry > 0) {
+      tx = NEST.x; ty = NEST.y;
+      if (dist(w, NEST) < NEST.r * 0.6) { colony.food += w.carry; w.carry = 0; w.target = null; }
+    } else {
+      if (w.target && !foods.includes(w.target)) w.target = null;
+      if (!w.target) {
+        let bestD = 700;
+        for (const f of foods) {
+          if (f.t === 2) continue; // 角砂糖は重すぎる
+          const d = dist(f, w);
+          if (d < bestD) { bestD = d; w.target = f; }
+        }
+      }
+      if (w.target) {
+        tx = w.target.x; ty = w.target.y;
+        if (dist(w, w.target) < w.target.r + 10) {
+          w.carry = w.target.v;
+          foods.splice(foods.indexOf(w.target), 1);
+          w.target = null;
+        }
+      }
+    }
+    if (tx !== undefined) {
+      w.a = Math.atan2(ty - w.y, tx - w.x);
+    } else {
+      w.wt -= DT;
+      if (w.wt <= 0) { w.a += rand(-1.2, 1.2); w.wt = rand(0.5, 2); }
+    }
+    w.x += Math.cos(w.a) * 105 * DT; w.y += Math.sin(w.a) * 105 * DT;
+    const bx = w.x, by = w.y;
+    resolve(w, 9);
+    if (bx !== w.x || by !== w.y) w.a += 0.4; // 岩に沿って回り込む
+  }
+}
+
+// ---- 雨 ----
+function updateRain() {
+  if (!colony.isNight && colony.rain <= 0 && colony.day >= 2 && Math.random() < DT / 45) {
+    colony.rain = 15;
+    msg('☔ 雨が降ってきた！巣に避難しろ！');
+  }
+  if (colony.rain > 0) {
+    colony.rain -= DT;
+    colony.rainSpawn -= DT;
+    if (colony.rainSpawn <= 0) {
+      colony.rainSpawn = 0.18;
+      const alive = Object.values(players).filter(p => !p.dead);
+      let x, y;
+      if (alive.length && Math.random() < 0.7) {
+        const p = alive[Math.floor(Math.random() * alive.length)];
+        x = p.x + rand(-350, 350); y = p.y + rand(-250, 250);
+      } else { x = rand(0, W); y = rand(0, H); }
+      if (Math.hypot(x - NEST.x, y - NEST.y) > NEST.r + 20) drops.push({ x, y, t: 1.4, max: 1.4, r: 45 });
+    }
+  }
+  for (const d of drops) {
+    d.t -= DT;
+    if (d.t <= 0) {
+      for (const id in players) {
+        const p = players[id];
+        if (!p.dead && dist(p, d) < d.r && dist(p, NEST) > NEST.r) {
+          p.hp -= 35;
+          if (p.hp <= 0) killPlayer(p, '雨粒に潰された…');
+        }
+      }
+      for (const w of workers) if (dist(w, d) < d.r) w.hp -= 25;
+      foods = foods.filter(f => dist(f, d) > d.r * 0.8);
+      io.emit('splash', { x: Math.round(d.x), y: Math.round(d.y), r: d.r });
+    }
+  }
+  drops = drops.filter(d => d.t > 0);
+}
+
+// ---- 昼夜 ----
+function updateDayCycle() {
+  colony.time += DT;
+  if (!colony.isNight && colony.time >= DAY_LEN) {
+    colony.isNight = true; colony.time = 0; colony.rain = 0;
+    msg(`🌙 ${colony.day}日目の夜。敵が巣を襲いにくる！`);
+  } else if (colony.isNight && colony.time >= NIGHT_LEN) {
+    colony.isNight = false; colony.time = 0; colony.day++;
+    for (const e of enemies) e.raid = false;
+    const need = Object.keys(players).length * 2 + workers.length;
+    if (colony.food >= need) {
+      colony.food -= need;
+      msg(`☀ ${colony.day}日目の朝。コロニーが食料を${need}消費した`);
+    } else {
+      const short = need - colony.food;
+      colony.food = 0;
+      colony.nestHp -= short * 4;
+      msg(`☀ ${colony.day}日目の朝。食料が${short}足りない！巣が弱っていく…`);
+    }
+  }
+}
+
+function updateSpawns() {
+  const want = Math.min(40, colony.isNight ? 6 + colony.day * 2 : 3 + colony.day);
+  if (enemies.length < want && Math.random() < (colony.isNight ? 0.08 : 0.02)) {
+    const beetleChance = Math.min(0.5, 0.15 + colony.day * 0.04);
+    spawnEnemy(Math.random() < beetleChance ? 'beetle' : 'spider', colony.isNight);
+  }
+  if (foods.length < FOOD_TARGET && Math.random() < 0.1) spawnFoodCluster();
+}
+
+// ---- プレイヤー更新 ----
+function updatePlayers() {
+  for (const id in players) {
+    const p = players[id];
+    if (p.dead) {
+      p.respawn -= DT;
+      if (p.respawn <= 0) spawnPlayer(p);
       continue;
     }
-    if (m.state === 'f') {
-      m.faintT -= dt;
-      m.x += m.kx * dt; m.y += m.ky * dt;
-      m.kx *= Math.pow(.02, dt); m.ky *= Math.pow(.02, dt);
-      collide(room, m, 18);
-      if (m.faintT <= 0) {
-        m.state = 'w'; m.hp = Math.ceil(m.mh * .4);
-        fx(room, [{ k: 'pop', x: m.x, y: m.y - 30, s: '目を覚ました', col: '#ffffff', z: 13 }]);
-      }
-      continue;
+    const len = Math.hypot(p.in.dx, p.in.dy);
+    if (len > 0.1) {
+      const spd = 175 * (1 - p.carry * 0.07);
+      p.x += p.in.dx / len * spd * DT; p.y += p.in.dy / len * spd * DT;
+      p.a = Math.atan2(p.in.dy, p.in.dx);
     }
-    m.anger = Math.max(0, m.anger - dt);
-    let target = null, td = 1e9;
-    for (const p of ps) {
-      if (p.stun) continue;
-      const d = Math.hypot(p.x - m.x, p.y - m.y);
-      if (d < td) { td = d; target = p; }
+    resolve(p, 12);
+    p.biteCd -= DT; p.biteAnim = Math.max(0, p.biteAnim - DT);
+
+    p.hunger -= (colony.isNight ? 1.2 : 0.9) * DT;
+    if (p.hunger <= 0) { p.hunger = 0; p.hp -= 4 * DT; }
+
+    const atNest = dist(p, NEST) < NEST.r;
+    if (atNest) {
+      if (p.carry > 0) { colony.food += p.carry; p.score += p.carry; p.carry = 0; }
+      if (p.hunger > 20) p.hp = Math.min(100, p.hp + 6 * DT);
+    } else if (p.hunger > 50) p.hp = Math.min(100, p.hp + 1 * DT);
+
+    // 拾う
+    for (let i = foods.length - 1; i >= 0; i--) {
+      const f = foods[i];
+      if (p.carry + f.v > MAX_CARRY) continue;
+      if (dist(p, f) < f.r + 14) { p.carry += f.v; foods.splice(i, 1); }
     }
-    const aggressive = (m.c.beh === 'aggr' || m.anger > 0) && target;
-    let tx = 0, ty = 0, sp = m.spd;
-    if (aggressive && td < 290) {
-      tx = (target.x - m.x) / (td || 1); ty = (target.y - m.y) / (td || 1);
-      sp *= m.c.beh === 'aggr' ? .78 : .9;
-    } else if (m.c.beh === 'timid' && target && td < 220) {
-      tx = -(target.x - m.x) / (td || 1); ty = -(target.y - m.y) / (td || 1); sp *= .95;
-    } else {
-      m.t -= dt;
-      if (m.t <= 0) {
-        m.t = rnd(1.2, 3);
-        if (Math.random() < .35) { m.wx = 0; m.wy = 0; }
-        else { const a = Math.random() * Math.PI * 2; m.wx = Math.cos(a); m.wy = Math.sin(a); }
-      }
-      tx = m.wx; ty = m.wy; sp *= .4;
-    }
-    m.x += (tx * sp + m.kx) * dt; m.y += (ty * sp + m.ky) * dt;
-    m.kx *= Math.pow(.02, dt); m.ky *= Math.pow(.02, dt);
-    const bx = m.x, by = m.y;
-    collide(room, m, 18);
-    if ((bx !== m.x || by !== m.y) && !aggressive) m.t = 0;
-    if (aggressive && td < 38 && m.hitCd <= 0) {
-      io.to(target.id).emit('hurt', { d: 8 + RAR_RANK[m.c.rar] * 3, x: m.x, y: m.y });
-      m.hitCd = 1;
-    }
+    if (p.hp <= 0) killPlayer(p, '力尽きた…');
+  }
+}
+
+// ---- メインループ ----
+function resetWorld() {
+  foods = []; enemies = []; workers = []; drops = [];
+  colony = newColony();
+  for (let i = 0; i < 25; i++) spawnFoodCluster();
+  for (const id in players) { spawnPlayer(players[id]); players[id].score = 0; }
+  gameOver = false;
+  io.emit('init', { W, H, nest: NEST, rocks, dayLen: DAY_LEN, nightLen: NIGHT_LEN });
+  msg('新しいコロニーが誕生した！');
+}
+
+let tickCount = 0;
+function tick() {
+  if (Object.keys(players).length === 0 || gameOver) return;
+  updatePlayers();
+  updateWorkers();
+  updateEnemies();
+  updateRain();
+  updateDayCycle();
+  updateSpawns();
+
+  if (colony.nestHp <= 0) {
+    gameOver = true;
+    best = Math.max(best, colony.day);
+    io.emit('gameover', { day: colony.day, best });
+    setTimeout(resetWorld, 6000);
   }
 
-  // パチボール（サブステップで当たり判定）
-  for (let i = room.balls.length - 1; i >= 0; i--) {
-    const b = room.balls[i];
-    let done = false;
-    for (let s = 0; s < 3 && !done; s++) {
-      const sx = b.vx * dt / 3, sy = b.vy * dt / 3;
-      b.x += sx; b.y += sy; b.dist += Math.hypot(sx, sy);
-      for (const m of room.mons) {
-        if (m.state === 'c') continue;
-        if (Math.hypot(m.x - b.x, m.y - b.y) < 26) { startCapture(m, b.owner); done = true; break; }
-      }
-      if (!done && room.obs.some(o => Math.hypot(o.x - b.x, o.y - b.y) < o.r * o.s * .8 + 6)) {
-        fx(room, [{ k: 'pop', x: b.x, y: b.y - 10, s: 'ミス', col: '#cfd5f2', z: 13 }, { k: 'burst', x: b.x, y: b.y, col: '#ff3d6e', n: 6, sp: 90 }]);
-        done = true;
-      }
-      if (!done && (b.dist > 380 || b.x < 0 || b.y < 0 || b.x > WORLD.w || b.y > WORLD.h)) {
-        fx(room, [{ k: 'pop', x: b.x, y: b.y - 10, s: 'ハズレ', col: '#cfd5f2', z: 13 }]);
-        done = true;
-      }
-    }
-    if (done) room.balls.splice(i, 1);
-  }
+  if (++tickCount % 2 === 0) broadcast();
+}
 
-  // スポーン
-  room.spawnT -= dt;
-  if (room.mons.length < monCap(room) && room.spawnT <= 0) { spawnMon(room, 480); room.spawnT = 1.6; }
-
-  // スナップショット送信
-  io.to(room.code).emit('snap', {
-    left: Math.max(0, room.endAt - Date.now()),
-    pl: ps.map(p => [p.id, Math.round(p.x), Math.round(p.y), Math.round(p.dx * 100), Math.round(p.dy * 100), p.sw, p.stun ? 1 : 0]),
-    m: room.mons.map(m => [m.i, m.c.id, Math.round(m.x), Math.round(m.y), m.hp, m.mh,
-      m.state === 'f' ? 1 : m.state === 'c' ? 2 : 0, (m.c.beh === 'aggr' || m.anger > 0) ? 1 : 0, Math.round(m.capT * 10)]),
-    b: room.balls.map(b => [Math.round(b.x), Math.round(b.y)])
+function broadcast() {
+  io.emit('state', {
+    p: Object.values(players).map(p => ({
+      id: p.id, n: p.name, col: p.color,
+      x: Math.round(p.x), y: Math.round(p.y), a: +p.a.toFixed(2),
+      hp: Math.round(p.hp), hu: Math.round(p.hunger), c: p.carry,
+      d: p.dead ? 1 : 0, rs: Math.ceil(p.respawn), b: p.biteAnim > 0 ? 1 : 0, s: p.score,
+    })),
+    e: enemies.map(e => [e.id, e.type === 'spider' ? 0 : 1, Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
+    w: workers.map(w => [w.id, Math.round(w.x), Math.round(w.y), +w.a.toFixed(2), w.carry ? 1 : 0]),
+    f: foods.map(f => [f.id, f.t, Math.round(f.x), Math.round(f.y)]),
+    r: drops.map(d => [Math.round(d.x), Math.round(d.y), +(d.t / d.max).toFixed(2), d.r]),
+    c: {
+      food: colony.food, nh: Math.max(0, Math.round(colony.nestHp)), mnh: colony.maxNestHp,
+      day: colony.day, time: +colony.time.toFixed(1), night: colony.isNight ? 1 : 0,
+      rain: colony.rain > 0 ? 1 : 0, wk: workers.length, best,
+    },
   });
 }
 
-function readyPayload(room) {
-  const ps = [...room.players.values()];
-  return { ids: ps.filter(p => p.ready).map(p => p.id), total: ps.length };
-}
-function checkAllReady(room) {
-  if (room.phase !== 'explore' || room.players.size === 0) return;
-  if ([...room.players.values()].every(p => p.ready)) {
-    io.to(room.code).emit('toast', { text: '✅ 全員の準備OK！ 選択フェーズへ進みます', cls: 'get' });
-    endExplore(room);
-  }
-}
-
-function endExplore(room) {
-  if (room.phase !== 'explore') return;
-  clearTimeout(room.exploreTimer);
-  clearInterval(room.tick);
-  room.phase = 'select';
-  io.to(room.code).emit('exploreEnd');
-  room.selectStartTimer = setTimeout(() => startSelect(room), 1800);
-}
-
-/* =========================================================
-   選択フェーズ
-========================================================= */
-function startSelect(room) {
-  if (room.phase !== 'select') return;
-  for (const p of room.players.values()) {
-    p.rescued = 0;
-    while (p.party.length < 3) {
-      p.party.push(rollInstance(drawOne([], 3)));
-      p.rescued++;
-    }
-    p.selected = false; p.team = null;
-    io.to(p.id).emit('selectStart', { party: p.party, left: SELECT_MS, rescued: p.rescued, stats: p.stats, items: p.inv.items });
-  }
-  room.selectEnd = Date.now() + SELECT_MS;
-  room.selectTimer = setTimeout(() => finishSelect(room), SELECT_MS + 800);
-}
-
-function autoTeam(p) {
-  return p.party.slice().sort((a, b) => instPower(b) - instPower(a)).slice(0, 3);
-}
-
-function finishSelect(room) {
-  if (room.phase !== 'select') return;
-  clearTimeout(room.selectTimer);
-  const ps = [...room.players.values()];
-  for (const p of ps) if (!p.team) { p.team = autoTeam(p); p.selected = true; }
-  room.phase = 'battle';
-  room.battles = [];
-  broadcastLobby(room);
-  const order = shuffle(ps);
-  for (let i = 0; i < order.length; i += 2) createBattle(room, order[i], order[i + 1] || null);
-}
-
-/* =========================================================
-   バトルエンジン（サーバー権威）
-========================================================= */
-const stageMul = s => (s >= 0 ? 1 + .25 * s : 1 / (1 - .25 * s));
-const act = side => side.units[side.idx];
-const avail = u => [0, 1, 2].filter(i => i !== u.lastSlot);
-
-function makeUnit(inst, sk) {
-  const c = CHAR_MAP[inst.id];
-  return {
-    id: c.id, inst, name: c.name, rar: c.rar, hp: inst.hp, maxHp: inst.hp, atk: inst.atk, def: inst.def, spd: inst.spd,
-    passive: c.passive, moves: c.moves.map((m, i) => ({ ...m, hand: inst.hands[i] })),
-    status: null, atkSt: 0, defSt: 0, lastSlot: null, flags: {}, fainted: false, sk
-  };
-}
-/* 相手側の技ロック・アイテム数は見せない */
-function maskSnap(snap, sk) {
-  const o = sk === 'a' ? 'b' : 'a';
-  return { [sk]: snap[sk], [o]: { idx: snap[o].idx, items: null, u: snap[o].u.map(u => ({ ...u, ls: null })) } };
-}
-function maskEvents(events, sk) { return events.map(e => (e.snap ? { ...e, snap: maskSnap(e.snap, sk) } : e)); }
-function snapB(B) {
-  const f = s => ({
-    idx: s.idx, items: { ...s.items },
-    u: s.units.map(u => ({ hp: u.hp, st: u.status ? [u.status.type, u.status.turns] : null, a: u.atkSt, d: u.defSt, fl: { ...u.flags }, ls: u.lastSlot, fa: u.fainted }))
-  });
-  return { a: f(B.sides.a), b: f(B.sides.b) };
-}
-function ev(B, o) { o.snap = snapB(B); B.ev.push(o); }
-function say(B, s, c = '', ms, extra = {}) { ev(B, { t: 'log', s, c, ms, ...extra }); }
-function bfx(B, side, f, pop, cls) { ev(B, { t: 'fx', side, f, pop, cls }); }
-
-function effAtk(u) {
-  let a = u.atk * stageMul(u.atkSt);
-  if (u.passive.key === 'haisui' && u.hp <= u.maxHp / 3) a *= 1.5;
-  if (u.status && u.status.type === 'burn') a *= .75;
-  return a;
-}
-function calcDamage(att, def, mv, mult) {
-  const df = def.def * stageMul(def.defSt);
-  let dmg = mv.power * effAtk(att) / df * .8 * rnd(.9, 1.1) * mult;
-  if (att.flags.power) dmg *= 1.5;
-  if (att.passive.key === 'dokutai' && def.status && def.status.type === 'poison') dmg *= 1.3;
-  const critRate = .06 + (mv.crit || 0) + (att.passive.key === 'shofuku' ? .2 : 0);
-  const crit = Math.random() < critRate;
-  if (crit) dmg *= 1.5;
-  if (def.passive.key === 'teppeki') dmg *= .85;
-  if (def.flags.guard) dmg *= .5;
-  return { dmg: Math.max(1, Math.round(dmg)), crit };
-}
-function healU(u, n) { const b = u.hp; u.hp = Math.min(u.maxHp, u.hp + n); return u.hp - b; }
-
-function inflict(B, t, type) {
-  if (t.hp <= 0 || t.status) return;
-  if (t.passive.key === 'furinkazan') { say(B, `${t.name}は【風林火山】で${STATUS[type].n}を受けつけない！`, 'sys', 560, { side: t.sk, pre: true }); return; }
-  if (t.flags.guard) { say(B, `${t.name}はシールドで${STATUS[type].n}を防いだ！`, 'sys', 560, { side: t.sk, pre: true }); return; }
-  let turns = STATUS[type].turns;
-  if (t.passive.key === 'seiryu') turns = Math.ceil(turns / 2);
-  t.status = { type, turns };
-  say(B, `${t.name}は${STATUS[type].ic}${STATUS[type].n}になった！`, 'st', 560, { side: t.sk, pre: true });
-}
-function stage(B, u, key, delta) {
-  const k = key === 'atk' ? 'atkSt' : 'defSt', label = key === 'atk' ? 'パワー' : '防御';
-  const before = u[k];
-  u[k] = clamp(u[k] + delta, -2, 2);
-  if (u[k] === before) { say(B, `${u.name}の${label}はこれ以上変わらない！`, 'sys', 400, { side: u.sk, pre: true }); return; }
-  say(B, `${u.name}の${label}が${delta > 0 ? '上がった！' : '下がった！'}`, delta > 0 ? 'up' : 'down', 450, { side: u.sk, pre: true });
-}
-function canAct(B, u) {
-  if (u.status && u.status.type === 'paralyze' && Math.random() < .3) {
-    say(B, `${u.name}は体がしびれて動けない！`, 'st', 560, { side: u.sk, pre: true });
-    return false;
-  }
-  return true;
-}
-
-function doAttack(B, att, def, mv, mult, defMv, defLost) {
-  if (att.hp <= 0 || def.hp <= 0) return;
-  bfx(B, att.sk, 'lunge');
-  say(B, `${att.name}の【${mv.name}】！`, 'act', 420, { side: att.sk, pre: true });
-  let total = 0, dodged = false;
-  if (def.passive.key === 'mikiri' && Math.random() < .25) {
-    dodged = true;
-    bfx(B, def.sk, 'dodge', 'MISS', 'miss');
-    say(B, `${def.name}は攻撃をひらりとかわした！（見切り）`, 'dodge', 640, { side: def.sk, pre: true });
-  }
-  if (!dodged) {
-    const hits = mv.hits || 1;
-    for (let h = 0; h < hits && def.hp > 0; h++) {
-      let { dmg, crit } = calcDamage(att, def, mv, mult);
-      if (defMv && defMv.guard) dmg = Math.max(1, Math.round(dmg * (1 - defMv.guard)));
-      def.hp = Math.max(0, def.hp - dmg);
-      total += dmg;
-      bfx(B, def.sk, 'shake', '-' + dmg, crit ? 'crit' : '');
-      say(B, `${def.name}に ${dmg} のダメージ！${crit ? '（急所！）' : ''}`, 'dmg', hits > 1 ? 420 : 560, { side: def.sk, pre: true });
-    }
-    if (hits > 1) say(B, `${hits}回ヒット！`, 'sys', 320);
-    if (defMv && defMv.guard && total > 0) say(B, `${def.name}は【${defMv.name}】でダメージを軽減した`, 'sys', 320, { side: def.sk, pre: true });
-  }
-  if (mv.drain && total > 0 && att.hp > 0) {
-    const h = healU(att, Math.round(total * mv.drain));
-    if (h) { bfx(B, att.sk, 'heal', '+' + h, 'healp'); say(B, `${att.name}はHPを ${h} 吸収した！`, 'heal', 560, { side: att.sk, pre: true }); }
-  }
-  if (mv.heal && att.hp > 0) {
-    const h = healU(att, Math.round(att.maxHp * mv.heal));
-    if (h) { bfx(B, att.sk, 'heal', '+' + h, 'healp'); say(B, `${att.name}はHPが ${h} 回復した！`, 'heal', 560, { side: att.sk, pre: true }); }
-  }
-  if (mv.recoil && total > 0 && att.hp > 0) {
-    const r = Math.max(1, Math.round(total * mv.recoil));
-    att.hp = Math.max(0, att.hp - r);
-    bfx(B, att.sk, 'shake', '-' + r, '');
-    say(B, `${att.name}は反動で ${r} のダメージ！`, 'dmg', 560, { side: att.sk, pre: true });
-  }
-  if (mv.selfBuff && att.hp > 0) for (const k in mv.selfBuff) stage(B, att, k, mv.selfBuff[k]);
-  if (!dodged && def.hp > 0) {
-    if (mv.foeDebuff) for (const k in mv.foeDebuff) stage(B, def, k, mv.foeDebuff[k]);
-    if (mv.status && Math.random() < mv.status.chance) inflict(B, def, mv.status.type);
-    if (att.passive.key === 'taiden' && total > 0 && !def.status && Math.random() < .2) {
-      say(B, `${att.name}の【帯電】が発動！`, 'sys', 380, { side: att.sk, pre: true });
-      inflict(B, def, 'paralyze');
-    }
-  }
-  if (defLost && defMv && defMv.counter && def.hp > 0 && att.hp > 0 && total > 0) {
-    const r = Math.max(1, Math.round(total * defMv.counter));
-    att.hp = Math.max(0, att.hp - r);
-    bfx(B, att.sk, 'shake', '-' + r, '');
-    say(B, `${def.name}の【${defMv.name}】！ ${r} のダメージを跳ね返した！`, 'dmg', 560, { side: def.sk, pre: true });
-  }
-}
-
-function useItem(B, side, u, k) {
-  side.items[k]--;
-  ev(B, { t: 'item', side: u.sk, k });
-  if (k === 'power') { u.flags.power = true; bfx(B, u.sk, 'heal', '攻撃UP', 'crit'); say(B, `${u.name}のパワーが上がった！（このターン1.5倍）`, 'up', 560, { side: u.sk, pre: true }); }
-  else if (k === 'guard') { u.flags.guard = true; bfx(B, u.sk, 'heal', 'SHIELD', 'miss'); say(B, `${u.name}はシールドに守られた！`, 'up', 560, { side: u.sk, pre: true }); }
-  else {
-    const h = healU(u, Math.round(u.maxHp * .4));
-    bfx(B, u.sk, 'heal', h ? '+' + h : '', 'healp');
-    say(B, `${u.name}のHPが ${h} 回復した！`, 'heal', 560, { side: u.sk, pre: true });
-    if (u.status) { const n = STATUS[u.status.type].n; u.status = null; say(B, `${u.name}の${n}が治った！`, 'heal', 560, { side: u.sk, pre: true }); }
-  }
-}
-
-function resolveClash(B, ma, mb) {
-  const A = act(B.sides.a), Bu = act(B.sides.b);
-  const am = A.moves[ma], bm = Bu.moves[mb];
-  let aH = am.hand, bH = bm.hand;
-  const aCan = canAct(B, A), bCan = canAct(B, Bu);
-  const others = h => ['g', 'c', 'p'].filter(x => x !== h);
-  if (aCan && A.status && A.status.type === 'confuse' && Math.random() < .4) {
-    aH = pick(others(am.hand));
-    say(B, `${A.name}は混乱して手が ${HAND_E[am.hand]}→${HAND_E[aH]} に変わった！`, 'st', 560, { side: 'a', pre: true });
-  }
-  if (bCan && Bu.status && Bu.status.type === 'confuse' && Math.random() < .4) {
-    bH = pick(others(bm.hand));
-    say(B, `${Bu.name}は混乱して手が ${HAND_E[bm.hand]}→${HAND_E[bH]} に変わった！`, 'st', 560, { side: 'b', pre: true });
-  }
-  let res;
-  if (!aCan && !bCan) res = null;
-  else if (!aCan) res = -1;
-  else if (!bCan) res = 1;
-  else res = judge(aH, bH);
-  ev(B, { t: 'clash', h: { a: aCan ? aH : null, b: bCan ? bH : null }, res });
-
-  if (res === 1) doAttack(B, A, Bu, am, 1, bCan ? bm : null, true);
-  else if (res === -1) doAttack(B, Bu, A, bm, 1, aCan ? am : null, true);
-  else if (res === 0) {
-    const aFirst = A.spd > Bu.spd || (A.spd === Bu.spd && Math.random() < .5);
-    const order = aFirst ? [[A, Bu, am, bm], [Bu, A, bm, am]] : [[Bu, A, bm, am], [A, Bu, am, bm]];
-    for (const [x, y, xm, ym] of order) {
-      if (x.hp <= 0 || y.hp <= 0) continue;
-      doAttack(B, x, y, xm, x.passive.key === 'shippu' ? 1 : .5, ym, false);
-    }
-  }
-}
-
-function endOfTurn(B) {
-  if (B.turn >= STORM_TURN) {
-    say(B, `⚡ 決戦の嵐が吹き荒れる！（${STORM_TURN}ターン目以降）`, 'down', 420);
-    for (const u of [act(B.sides.a), act(B.sides.b)]) {
-      if (u.hp <= 0) continue;
-      const d = Math.max(1, Math.round(u.maxHp * .1));
-      u.hp = Math.max(0, u.hp - d);
-      bfx(B, u.sk, 'shake', '-' + d, 'stdmg');
-      say(B, `${u.name}は嵐で ${d} のダメージ！`, 'dmg', 420, { side: u.sk, pre: true });
-    }
-  }
-  for (const u of [act(B.sides.a), act(B.sides.b)]) {
-    if (u.hp <= 0) continue;
-    if (u.status) {
-      const st = u.status, info = STATUS[st.type];
-      if (st.type === 'poison' || st.type === 'burn') {
-        const d = Math.max(1, Math.round(u.maxHp * (st.type === 'poison' ? .08 : .06)));
-        u.hp = Math.max(0, u.hp - d);
-        bfx(B, u.sk, 'shake', '-' + d, 'stdmg');
-        say(B, `${u.name}は${info.n}で ${d} のダメージ！`, 'st', 560, { side: u.sk, pre: true });
-      }
-      if (u.hp > 0) {
-        st.turns--;
-        if (st.turns <= 0) { u.status = null; say(B, `${u.name}の${info.n}が治った！`, 'heal', 560, { side: u.sk, pre: true }); }
-      }
-    }
-    if (u.hp > 0 && u.passive.key === 'regen' && u.hp < u.maxHp) {
-      const h = healU(u, Math.round(u.maxHp * .06));
-      if (h) { bfx(B, u.sk, 'heal', '+' + h, 'healp'); say(B, `${u.name}は【森の恵み】でHPが ${h} 回復！`, 'heal', 460, { side: u.sk, pre: true }); }
-    }
-  }
-}
-
-function checkFaints(B) {
-  for (const sk of ['b', 'a']) {
-    const u = act(B.sides[sk]);
-    if (u.hp <= 0 && !u.fainted) {
-      u.fainted = true;
-      ev(B, { t: 'faint', side: sk });
-      say(B, `${u.name}は倒れた！`, 'ko', 800, { side: sk, pre: true });
-    }
-  }
-  const aA = B.sides.a.units.some(u => u.hp > 0), bA = B.sides.b.units.some(u => u.hp > 0);
-  if (!aA || !bA) {
-    B.over = true;
-    ev(B, { t: 'end', winner: aA ? 'a' : bA ? 'b' : 'draw', turn: B.turn });
-    return;
-  }
-  for (const sk of ['b', 'a']) {
-    const side = B.sides[sk];
-    if (!act(side).fainted) continue;
-    const alive = side.units.map((u, i) => [u, i]).filter(([u]) => u.hp > 0);
-    if (side.cpu || alive.length === 1) {
-      side.idx = alive[0][1];
-      ev(B, { t: 'enter', side: sk });
-    } else {
-      B.pending[sk] = true;
-    }
-  }
-}
-
-/* ----- CPU ----- */
-function estDmg(a, d, m) {
-  let v = m.power * effAtk(a) / (d.def * stageMul(d.defSt)) * .8 * (m.hits || 1);
-  if (d.passive.key === 'teppeki') v *= .85;
-  if (a.passive.key === 'dokutai' && d.status && d.status.type === 'poison') v *= 1.3;
-  return v;
-}
-function cpuChoose(E, P) {
-  const ea = avail(E), pa = avail(P);
-  let best = ea[0], bs = -1e9;
-  for (const i of ea) {
-    const em = E.moves[i];
-    let evv = 0;
-    for (const j of pa) {
-      const pm = P.moves[j];
-      const r = judge(em.hand, pm.hand);
-      const de = estDmg(E, P, em) * (pm.guard ? 1 - pm.guard : 1);
-      const dp = estDmg(P, E, pm) * (em.guard ? 1 - em.guard : 1);
-      let v;
-      if (r === 1) v = de;
-      else if (r === -1) v = -dp + (em.counter ? dp * em.counter * .8 : 0);
-      else v = de * (E.passive.key === 'shippu' ? 1 : .5) - dp * (P.passive.key === 'shippu' ? 1 : .5);
-      if (r >= 0) {
-        if (em.status && !P.status && P.passive.key !== 'furinkazan') v += 9 * em.status.chance;
-        if (em.heal) v += Math.min(E.maxHp - E.hp, E.maxHp * em.heal) * .6;
-        if (em.selfBuff) v += 5;
-        if (em.foeDebuff) v += 4;
-        if (em.recoil) v -= de * em.recoil * .6;
-      }
-      if (r === 1 && de >= P.hp) v += 40;
-      if (r === -1 && dp >= E.hp) v -= 30;
-      evv += v;
-    }
-    evv = evv / pa.length + rnd(-9, 9);
-    if (evv > bs) { bs = evv; best = i; }
-  }
-  return best;
-}
-function cpuItem(side, u) {
-  const it = side.items;
-  if (it.heal > 0 && (u.hp < u.maxHp * .35 || (u.status && u.hp < u.maxHp * .6)) && Math.random() < .75) return 'heal';
-  if (it.guard > 0 && u.hp < u.maxHp * .55 && Math.random() < .3) return 'guard';
-  if (it.power > 0 && Math.random() < .18) return 'power';
-  return null;
-}
-
-/* ----- バトル進行 ----- */
-let battleSeq = 1;
-function createBattle(room, p1, p2) {
-  const mkSide = (p, sk) => ({
-    pid: p.id, name: p.name, cpu: false, idx: 0,
-    units: p.team.map(e => makeUnit(e, sk)), items: { ...p.inv.items }
-  });
-  const cpuSide = sk => {
-    const ids = [];
-    for (let i = 0; i < 3; i++) ids.push(drawOne(ids, 6).id);
-    return { pid: null, name: 'CPU 野良の将', cpu: true, idx: 0, units: shuffle(ids).map(id => makeUnit(rollInstance(CHAR_MAP[id]), sk)), items: { power: 1, guard: 1, heal: 2 } };
-  };
-  const B = {
-    id: battleSeq++, room, turn: 1, phase: 'choose', over: false, ev: [], timer: null,
-    sides: { a: mkSide(p1, 'a'), b: p2 ? mkSide(p2, 'b') : cpuSide('b') },
-    choices: { a: null, b: null }, pending: { a: false, b: false }, swq: []
-  };
-  room.battles.push(B);
-  p1.battle = B;
-  if (p2) p2.battle = B;
-  const names = { a: B.sides.a.name, b: B.sides.b.name };
-  const colors = { a: p1.color, b: p2 ? p2.color : '#8b5cf6' };
-  for (const sk of ['a', 'b']) {
-    const s = B.sides[sk];
-    if (s.cpu) continue;
-    const ok = sk === 'a' ? 'b' : 'a';
-    const teams = {
-      [sk]: s.units.map(u => u.inst),
-      [ok]: B.sides[ok].units.map(u => ({ id: u.id, hp: u.maxHp }))
-    };
-    io.to(s.pid).emit('battleStart', { me: sk, names, colors, teams, snap: maskSnap(snapB(B), sk), left: TURN_MS, cpu: !p2 });
-  }
-  startTurnTimer(B, TURN_MS + 6000);
-}
-
-function startTurnTimer(B, ms) {
-  clearTimeout(B.timer);
-  B.phase = 'choose';
-  B.timer = setTimeout(() => turnTimeout(B), ms);
-}
-function turnTimeout(B) {
-  if (B.over || B.phase !== 'choose') return;
-  for (const sk of ['a', 'b']) {
-    if (B.sides[sk].cpu || B.choices[sk]) continue;
-    B.choices[sk] = { move: pick(avail(act(B.sides[sk]))), item: null, auto: true };
-  }
-  resolveTurnB(B);
-}
-function humanSides(B) { return ['a', 'b'].filter(sk => !B.sides[sk].cpu); }
-
-function resolveTurnB(B) {
-  clearTimeout(B.timer);
-  B.phase = 'resolving';
-  const A = B.sides.a, Bs = B.sides.b;
-  for (const sk of ['a', 'b']) {
-    const s = B.sides[sk], o = B.sides[sk === 'a' ? 'b' : 'a'];
-    if (s.cpu) B.choices[sk] = { move: cpuChoose(act(s), act(o)), item: cpuItem(s, act(s)) };
-  }
-  const ca = B.choices.a, cb = B.choices.b;
-  const ua = act(A), ub = act(Bs);
-  B.ev = [];
-  ev(B, { t: 'turn', n: B.turn });
-  for (const [sk, c] of [['a', ca], ['b', cb]]) {
-    if (c.auto) say(B, `${B.sides[sk].name} は時間切れ！ 技が自動で選ばれた`, 'sys', 400);
-  }
-  if (ca.item) useItem(B, A, ua, ca.item);
-  if (cb.item) useItem(B, Bs, ub, cb.item);
-  resolveClash(B, ca.move, cb.move);
-  ua.lastSlot = ca.move; ub.lastSlot = cb.move;
-  endOfTurn(B);
-  ua.flags = {}; ub.flags = {};
-  checkFaints(B);
-  B.choices = { a: null, b: null };
-  ev(B, { t: 'sync' });
-  const events = B.ev;
-  const needAny = !B.over && humanSides(B).some(sk => B.pending[sk]);
-  if (!B.over && !needAny) B.turn++;
-  for (const sk of humanSides(B)) {
-    io.to(B.sides[sk].pid).emit('turnResult', { events: maskEvents(events, sk), needSwitch: !!B.pending[sk], left: needAny ? SWITCH_MS : TURN_MS });
-  }
-  if (B.over) { finishBattle(B); return; }
-  if (needAny) {
-    B.phase = 'switch';
-    B.timer = setTimeout(() => switchTimeout(B), SWITCH_MS + 15000);
-  } else {
-    startTurnTimer(B, TURN_MS + 15000);
-  }
-}
-
-function applySwitch(B, sk, idx) {
-  const side = B.sides[sk];
-  const u = side.units[idx];
-  if (!u || u.hp <= 0) idx = side.units.findIndex(x => x.hp > 0);
-  side.idx = idx;
-  B.pending[sk] = false;
-  B.swq.push(sk);
-  if (humanSides(B).every(s => !B.pending[s])) {
-    clearTimeout(B.timer);
-    B.ev = [];
-    for (const s of B.swq) ev(B, { t: 'enter', side: s });
-    B.swq = [];
-    ev(B, { t: 'sync' });
-    B.turn++;
-    for (const s of humanSides(B)) io.to(B.sides[s].pid).emit('switchResult', { events: maskEvents(B.ev, s), left: TURN_MS });
-    startTurnTimer(B, TURN_MS + 4000);
-  }
-}
-function switchTimeout(B) {
-  if (B.over || B.phase !== 'switch') return;
-  for (const sk of humanSides(B)) {
-    if (B.pending[sk]) applySwitch(B, sk, B.sides[sk].units.findIndex(u => u.hp > 0));
-  }
-}
-
-function battleForfeit(B, leaverId) {
-  if (B.over) return;
-  const lk = B.sides.a.pid === leaverId ? 'a' : 'b';
-  const wk = lk === 'a' ? 'b' : 'a';
-  B.over = true;
-  clearTimeout(B.timer);
-  B.ev = [];
-  say(B, `${B.sides[lk].name} がリタイアしたため、バトル終了！`, 'sys', 600);
-  ev(B, { t: 'end', winner: wk, turn: B.turn, reason: 'left' });
-  if (!B.sides[wk].cpu) io.to(B.sides[wk].pid).emit('turnResult', { events: maskEvents(B.ev, wk), needSwitch: false, left: 0 });
-  finishBattle(B);
-}
-
-function finishBattle(B) {
-  B.over = true;
-  clearTimeout(B.timer);
-  checkAllBattles(B.room);
-}
-function checkAllBattles(room) {
-  if (room.phase !== 'battle') return;
-  if (room.battles.every(b => b.over)) {
-    room.phase = 'lobby';
-    for (const p of room.players.values()) p.battle = null;
-    broadcastLobby(room);
-  }
-}
-
-/* =========================================================
-   Socket.io
-========================================================= */
+// ---- 通信 ----
 io.on('connection', socket => {
-  socket.data.room = null;
-  socket.emit('hello', { chars: CHARS, items: ITEMS, itemMax: ITEM_MAX, status: STATUS, world: WORLD });
+  socket.emit('init', { W, H, nest: NEST, rocks, dayLen: DAY_LEN, nightLen: NIGHT_LEN });
+  socket.emit('you', socket.id);
 
-  socket.on('join', (d, cb) => {
-    const reply = typeof cb === 'function' ? cb : () => {};
-    const code = String((d && d.code) || '').trim();
-    const name = String((d && d.name) || '').replace(/[<>&"'`]/g, '').trim().slice(0, 10) || 'ななし';
-    if (!/^\d{5}$/.test(code)) return reply({ ok: false, msg: 'パスワードは5桁の数字で入力してください' });
-    if (socket.data.room) leaveRoom(socket);
-    let room = rooms.get(code);
-    if (!room) {
-      room = { code, players: new Map(), hostId: socket.id, phase: 'lobby', battles: [], obs: [], chests: [], mons: [], balls: [] };
-      rooms.set(code, room);
-    }
-    if (room.phase !== 'lobby') return reply({ ok: false, msg: 'このルームはゲーム進行中です。終了後にもう一度入室してください' });
-    if (room.players.size >= MAX_PLAYERS) return reply({ ok: false, msg: `ルームが満員です（最大${MAX_PLAYERS}人）` });
-    room.players.set(socket.id, newPlayer(socket, name, room));
-    socket.data.room = code;
-    socket.join(code);
-    reply({ ok: true, you: socket.id });
-    broadcastLobby(room);
-    socket.to(code).emit('toast', { text: `${name} が入室しました`, cls: 'item' });
+  socket.on('join', name => {
+    if (players[socket.id]) return;
+    const p = {
+      id: socket.id,
+      name: String(name || 'アリ').replace(/[<>]/g, '').slice(0, 10) || 'アリ',
+      color: COLORS[Object.keys(players).length % COLORS.length],
+      in: { dx: 0, dy: 0 }, a: 0, biteCd: 0, biteAnim: 0, score: 0,
+    };
+    spawnPlayer(p);
+    players[socket.id] = p;
+    msg(`🐜 ${p.name} がコロニーに加わった`);
   });
-
-  socket.on('leave', () => leaveRoom(socket, true));
-
-  socket.on('lobbyState', () => {
-    const { room } = ctxOf(socket);
-    if (room) socket.emit('lobby', lobbyPayload(room));
+  socket.on('input', d => {
+    const p = players[socket.id];
+    if (!p || !d) return;
+    p.in.dx = clamp(+d.dx || 0, -1, 1);
+    p.in.dy = clamp(+d.dy || 0, -1, 1);
   });
-
-  socket.on('startGame', () => {
-    const { room } = ctxOf(socket);
-    if (!room || room.hostId !== socket.id || room.phase !== 'lobby') return;
-    startGame(room);
+  socket.on('action', t => handleAction(players[socket.id], t));
+  socket.on('disconnect', () => {
+    const p = players[socket.id];
+    if (p) { msg(`${p.name} が去った`); delete players[socket.id]; }
   });
-
-  socket.on('ready', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'explore') return;
-    p.ready = !!(d && d.on);
-    io.to(room.code).emit('readyStatus', readyPayload(room));
-    if (p.ready) socket.to(room.code).emit('toast', { text: `✅ ${p.name} が準備OK（${readyPayload(room).ids.length}/${room.players.size}）`, cls: '' });
-    checkAllReady(room);
-  });
-
-  socket.on('hostEndExplore', () => {
-    const { room } = ctxOf(socket);
-    if (!room || room.hostId !== socket.id || room.phase !== 'explore') return;
-    io.to(room.code).emit('toast', { text: 'ホストが探索を終了しました', cls: 'warn' });
-    endExplore(room);
-  });
-
-  socket.on('pos', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'explore' || !d) return;
-    p.x = clamp(num(d.x, p.x), 0, WORLD.w);
-    p.y = clamp(num(d.y, p.y), 0, WORLD.h);
-    const dx = num(d.dx, p.dx), dy = num(d.dy, p.dy), l = Math.hypot(dx, dy);
-    if (l > 0.01) { p.dx = dx / l; p.dy = dy / l; }
-    p.stun = !!d.s;
-  });
-
-  socket.on('sword', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'explore' || p.stun || !d) return;
-    const now = Date.now();
-    if (now - p.lastSword < 300) return;
-    p.lastSword = now;
-    p.sw++;
-    p.x = clamp(num(d.x, p.x), 0, WORLD.w);
-    p.y = clamp(num(d.y, p.y), 0, WORLD.h);
-    let dx = num(d.dx, p.dx), dy = num(d.dy, p.dy);
-    const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
-    p.dx = dx; p.dy = dy;
-    for (const m of room.mons.slice()) {
-      if (m.state !== 'w') continue;
-      const vx = m.x - p.x, vy = m.y - p.y, dist = Math.hypot(vx, vy) || 1;
-      const dot = (vx * dx + vy * dy) / dist;
-      if (dist < 84 && (dot > .15 || dist < 34)) hitMon(room, m, p, vx / dist, vy / dist);
-    }
-  });
-
-  socket.on('throw', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'explore' || p.stun || !d) return;
-    const now = Date.now();
-    if (now - p.lastThrow < 380) return;
-    if (p.inv.balls <= 0) { toastTo(p.id, 'パチボールがない！ 宝箱を探そう', 'warn'); return; }
-    p.lastThrow = now;
-    let dx = num(d.dx, p.dx), dy = num(d.dy, p.dy);
-    const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
-    p.inv.balls--;
-    sendInv(p);
-    room.balls.push({ x: p.x, y: p.y - 6, vx: dx * 580, vy: dy * 580, dist: 0, owner: p.id });
-  });
-
-  socket.on('chest', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'explore' || !d) return;
-    const c = room.chests[num(d.id, -1)];
-    if (!c || c.open) return;
-    if (Math.hypot(p.x - c.x, p.y - (c.y - 10)) > 120) return;
-    c.open = true;
-    p.stats.chests++;
-    io.to(room.code).emit('chest', { id: c.id });
-    fx(room, [{ k: 'burst', x: c.x, y: c.y - 12, col: '#ffd166', n: 20, sp: 180 }]);
-    giveChest(room, p, c);
-  });
-
-  socket.on('discardItem', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || !d || !['explore', 'select'].includes(room.phase)) return;
-    const k = typeof d.k === 'string' && ITEM_MAX[d.k] ? d.k : null;
-    if (!k || p.inv.items[k] <= 0) return;
-    p.inv.items[k]--;
-    sendInv(p);
-  });
-
-  socket.on('selectTeam', d => {
-    const { room, p } = ctxOf(socket);
-    if (!room || !p || room.phase !== 'select' || p.selected || !d || !Array.isArray(d.uids)) return;
-    const uids = d.uids.slice(0, 3).map(String);
-    if (uids.length !== 3 || new Set(uids).size !== 3) return;
-    const team = uids.map(u => p.party.find(e => e.uid === u));
-    if (team.some(e => !e)) return;
-    p.team = team;
-    p.selected = true;
-    const ps = [...room.players.values()];
-    const done = ps.filter(q => q.selected).length;
-    io.to(room.code).emit('selectStatus', { done, total: ps.length });
-    if (done === ps.length) finishSelect(room);
-  });
-
-  socket.on('battleAction', d => {
-    const { p } = ctxOf(socket);
-    const B = p && p.battle;
-    if (!B || B.over || B.phase !== 'choose' || !d) return;
-    const sk = B.sides.a.pid === p.id ? 'a' : 'b';
-    if (B.choices[sk]) return;
-    const u = act(B.sides[sk]);
-    const move = Math.floor(num(d.move, -1));
-    if (!avail(u).includes(move)) {
-      socket.emit('actionRejected', { msg: 'その技は今は使えません（連続使用不可）', snap: maskSnap(snapB(B), sk) });
-      return;
-    }
-    let item = typeof d.item === 'string' && ITEMS[d.item] ? d.item : null;
-    if (item && B.sides[sk].items[item] <= 0) item = null;
-    B.choices[sk] = { move, item };
-    const ok = sk === 'a' ? 'b' : 'a';
-    if (!B.sides[ok].cpu) io.to(B.sides[ok].pid).emit('oppReady');
-    if (B.sides[ok].cpu || B.choices[ok]) resolveTurnB(B);
-  });
-
-  socket.on('battleSwitch', d => {
-    const { p } = ctxOf(socket);
-    const B = p && p.battle;
-    if (!B || B.over || B.phase !== 'switch' || !d) return;
-    const sk = B.sides.a.pid === p.id ? 'a' : 'b';
-    if (!B.pending[sk]) return;
-    applySwitch(B, sk, Math.floor(num(d.idx, -1)));
-  });
-
-  socket.on('disconnect', () => leaveRoom(socket));
 });
 
-server.listen(PORT, () => {
-  console.log(`パチットモンスター server running on port ${PORT}`);
-});
+genRocks();
+colony = newColony();
+for (let i = 0; i < 25; i++) spawnFoodCluster();
+setInterval(tick, 1000 / TICK);
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Ant Survival running on port ${PORT}`));
