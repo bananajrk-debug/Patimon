@@ -1,7 +1,7 @@
 {
   "name": "ant-survival",
-  "version": "0.1.0",
-  "description": "2D multiplayer ant colony survival game",
+  "version": "0.2.0",
+  "description": "2D online co-op ant survival craft game",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "mongodb": "^6.8.0",
     "socket.io": "^4.7.5"
   }
 }
