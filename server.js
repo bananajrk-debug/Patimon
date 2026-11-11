@@ -1,440 +1,1006 @@
-// ===== アリ・サバイバル サーバー =====
+// ===== アリ・サバイバル（アリのマイクラ） サーバー =====
+'use strict';
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// ---- 定数 ----
-const W = 3000, H = 2200;
-const NEST = { x: W / 2, y: H / 2, r: 70 };
+// ================= 基本設定 =================
+const T = 32;                       // 1マスの大きさ
+const SW = 200, SH = 150;           // 地上のマス数
+const UW = 140, UH = 140;           // 地下のマス数
+const UCX = 70, UCY = 70;           // 地下の中心
+const NEST = { x: SW / 2 * T, y: SH / 2 * T, r: 36 };     // 地上の巣穴
+const UENT = { tx: UCX - 1, ty: UCY - 1 };                 // 地下の出入口マス
+const UENT_X = (UENT.tx + 0.5) * T, UENT_Y = (UENT.ty + 0.5) * T;
 const TICK = 30, DT = 1 / TICK;
-const DAY_LEN = 150, NIGHT_LEN = 60;        // 秒
-const MAX_CARRY = 5;
-const FOOD_TARGET = 90;
-const MAX_WORKERS = 25;
-const HATCH_COST = 8, REPAIR_COST = 5;
-const COLORS = ['#c0392b', '#2c3e50', '#8e44ad', '#d35400', '#16a085', '#7f5a2a', '#2980b9', '#b03a7a'];
+const DAY_LEN = 180, NIGHT_LEN = 90;
+const PLAYER_SPEED = 150, PR = 10, REACH = 80;
+const INV_SIZE = 24, CHEST_SIZE = 16, STACK = 50;
+const SUPPORT_RANGE = 2;            // 土の壁から何マス以内なら支えられるか
+const CRACK_TIME = 5;               // ヒビが入ってから崩れるまでの秒数
+const ALL_DEAD_GAMEOVER = true;     // 全員同時に死んだらゲームオーバー（ワールドリセット）
+const SAVE_INTERVAL = 60;
+const SAVE_DIR = path.join(__dirname, 'saves');
+const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#e67e22', '#1abc9c', '#f1c40f', '#ecf0f1', '#e84393'];
 
-// 食べ物タイプ（index順でクライアントに送る）
-const FOOD_TYPES = [
-  { name: 'crumb', v: 1, r: 6 },   // パンくず
-  { name: 'seed',  v: 2, r: 8 },   // 種
-  { name: 'sugar', v: 5, r: 12 },  // 角砂糖（手ぶらの時だけ運べる）
-  { name: 'meat',  v: 2, r: 9 },   // 虫の肉（敵を倒すと出る）
-];
-const ENEMY = {
-  spider: { hp: 40, spd: 135, dmg: 10, r: 22, detect: 320, drop: 2 },
-  beetle: { hp: 90, spd: 70,  dmg: 18, r: 26, detect: 220, drop: 3 },
+// 地下タイル
+const U = { OPEN: 0, DIRT: 1, CLAY: 2, ROOT: 3, GLOW: 4, HARD: 5, RUBBLE: 6, ENT: 7 };
+const isNatSolid = v => v >= 1 && v <= 6;
+const TILE_INFO = {
+  1: { h: 10, drop: [['dirt', 1]] },
+  2: { h: 25, jaw: 2, drop: [['clay', 1]] },
+  3: { h: 15, drop: [['root', 1], ['dirt', 1]] },
+  4: { h: 6, drop: [['glow', 1]] },
 };
 
-// ---- 状態 ----
-let rocks = [], players = {}, foods = [], enemies = [], workers = [], drops = [];
-let nextId = 1;
-let colony, gameOver = false, best = 0;
+const ITEMS = {
+  crumb: { n: 'パンくず', food: 8 }, seed: { n: '種', food: 12 }, sugar: { n: '角砂糖', food: 35 },
+  fruit: { n: '果物のかけら', food: 22 }, meat: { n: '虫の肉', food: 15 }, grass: { n: '草', food: 4 },
+  leaf: { n: '葉っぱ' }, twig: { n: '小枝' }, pebble: { n: '小石' }, needle: { n: '松葉' },
+  dirt: { n: '土' }, clay: { n: '粘土' }, root: { n: '木の根' }, glow: { n: '光るキノコ' },
+  silk: { n: 'クモの糸' }, shell: { n: '甲殻' },
+  chest: { n: 'チェスト', place: 'chest' }, bench: { n: '作業台', place: 'bench' },
+  barricade: { n: '土のバリケード', place: 'barricade' }, clayWall: { n: '粘土の壁', place: 'clayWall' },
+  pillarD: { n: '土の柱', place: 'pillarD' }, pillarR: { n: '根っこの柱', place: 'pillarR' },
+  lamp: { n: 'キノコランプ', place: 'lamp' }, spike: { n: 'トゲ罠', place: 'spike' }, net: { n: '糸のネット', place: 'net' },
+  jaw2: { n: '小石の大あご', jaw: 2, stack: 1 }, jaw3: { n: '甲殻の大あご', jaw: 3, stack: 1 },
+  armor1: { n: '葉のマント', armor: 0.15, stack: 1 }, armor2: { n: '甲殻アーマー', armor: 0.4, stack: 1 },
+};
+const JAW = { 1: { dig: 12, atk: 10 }, 2: { dig: 20, atk: 18 }, 3: { dig: 30, atk: 28 } };
+const OBJ = {
+  chest: { solid: 1, hp: 40 }, bench: { solid: 1, hp: 40 },
+  barricade: { solid: 1, hp: 60 }, clayWall: { solid: 1, hp: 180 },
+  pillarD: { solid: 1, hp: 50, support: 3 }, pillarR: { solid: 1, hp: 90, support: 5 },
+  lamp: { solid: 0, hp: 10, light: 1 }, spike: { solid: 0, hp: 40 }, net: { solid: 0, hp: 30 },
+  sugarNode: { solid: 1, hp: 30, natural: 1 },
+};
+const RECIPES = [
+  { out: 'bench', n: 1, cost: { twig: 4, leaf: 2 } },
+  { out: 'chest', n: 1, cost: { leaf: 3, twig: 2 } },
+  { out: 'barricade', n: 1, cost: { dirt: 4 } },
+  { out: 'pillarD', n: 1, cost: { dirt: 3 } },
+  { out: 'lamp', n: 1, cost: { glow: 2 } },
+  { out: 'armor1', n: 1, cost: { leaf: 6, twig: 2 } },
+  { out: 'jaw2', n: 1, cost: { pebble: 3, twig: 2 }, bench: 1 },
+  { out: 'clayWall', n: 1, cost: { clay: 3, pebble: 1 }, bench: 1 },
+  { out: 'pillarR', n: 1, cost: { root: 2, clay: 1 }, bench: 1 },
+  { out: 'spike', n: 2, cost: { needle: 3 }, bench: 1 },
+  { out: 'net', n: 1, cost: { silk: 3 }, bench: 1 },
+  { out: 'jaw3', n: 1, cost: { shell: 2, pebble: 2, silk: 2 }, bench: 1 },
+  { out: 'armor2', n: 1, cost: { shell: 4, silk: 2 }, bench: 1 },
+];
+const EN = {
+  spider: { idx: 0, n: 'クモ', hp: 45, spd: 125, dmg: 12, r: 13, detect: 260, chew: 10, drops: [['meat', 1, 1], ['silk', 1, 2]] },
+  beetle: { idx: 1, n: 'カブトムシ', hp: 120, spd: 62, dmg: 22, r: 15, detect: 200, chew: 25, drops: [['meat', 1, 2], ['shell', 1, 2]] },
+};
+// 地上の資源（巣からの距離ゾーンごと）
+const RES = [
+  { z: 1, item: 'crumb', n: 40 }, { z: 1, item: 'leaf', n: 40 }, { z: 1, item: 'twig', n: 30 },
+  { z: 2, item: 'seed', n: 35 }, { z: 2, item: 'pebble', n: 30 }, { z: 2, item: 'needle', n: 30 },
+  { z: 2, item: 'leaf', n: 20 }, { z: 2, item: 'twig', n: 25 },
+  { z: 3, item: 'fruit', n: 25 }, { z: 3, item: 'pebble', n: 20 }, { z: 3, item: 'needle', n: 20 }, { z: 3, item: 'seed', n: 15 },
+];
+const SUGAR_NODES = 14;
 
+// ================= 小物 =================
 const rand = (a, b) => a + Math.random() * (b - a);
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const msg = (text) => io.emit('msg', text);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function hash2(x, y, s) {
+  let h = (x * 374761393 + y * 668265263 + s * 1442695041) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi, s), b = hash2(xi + 1, yi, s), c = hash2(xi, yi + 1, s), d = hash2(xi + 1, yi + 1, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+const LW = l => (l === 'u' ? UW : SW);
+const LH = l => (l === 'u' ? UH : SH);
+const zoneOf = (x, y) => { const d = Math.hypot(x - NEST.x, y - NEST.y) / T; return d < 30 ? 1 : d < 62 ? 2 : 3; };
 
-function newColony() {
-  return { food: 20, nestHp: 100, maxNestHp: 100, day: 1, time: 0, isNight: false, rain: 0, rainSpawn: 0 };
+// ---- インベントリ ----
+const maxStack = id => ITEMS[id].stack || STACK;
+function addItem(inv, id, n) {
+  for (const s of inv) if (s && s.id === id && s.n < maxStack(id)) {
+    const k = Math.min(n, maxStack(id) - s.n); s.n += k; n -= k; if (!n) return 0;
+  }
+  for (let i = 0; i < inv.length; i++) if (!inv[i]) {
+    const k = Math.min(n, maxStack(id)); inv[i] = { id, n: k }; n -= k; if (!n) return 0;
+  }
+  return n;
+}
+const countItem = (inv, id) => inv.reduce((a, s) => a + (s && s.id === id ? s.n : 0), 0);
+function removeItem(inv, id, n) {
+  for (let i = inv.length - 1; i >= 0 && n > 0; i--) {
+    const s = inv[i];
+    if (s && s.id === id) { const k = Math.min(n, s.n); s.n -= k; n -= k; if (!s.n) inv[i] = null; }
+  }
+}
+const bestJaw = inv => inv.reduce((l, s) => (s && ITEMS[s.id].jaw > l ? ITEMS[s.id].jaw : l), 1);
+const bestArmor = inv => inv.reduce((a, s) => (s && ITEMS[s.id].armor > a ? ITEMS[s.id].armor : a), 0);
+
+// ================= ワールド生成 =================
+function genUnder(seed) {
+  const g = new Uint8Array(UW * UH).fill(U.DIRT);
+  for (let ty = 0; ty < UH; ty++) for (let tx = 0; tx < UW; tx++) {
+    const i = ty * UW + tx;
+    if (tx < 2 || ty < 2 || tx >= UW - 2 || ty >= UH - 2) { g[i] = U.HARD; continue; }
+    const d = Math.hypot(tx - UCX, ty - UCY);
+    if (d < 6) continue;
+    const n1 = vnoise(tx / 7, ty / 7, seed), n2 = vnoise(tx / 9, ty / 9, seed + 7);
+    if (n2 > 0.72 && d > 14) g[i] = U.HARD;
+    else if (n1 > 0.64 - Math.min(0.12, d / 500)) g[i] = U.CLAY;
+    else if (Math.random() < 0.018) g[i] = U.GLOW;
+  }
+  for (let v = 0; v < 35; v++) {           // 木の根の筋
+    let x = randi(4, UW - 5), y = randi(4, UH - 5), a = rand(0, 6.28);
+    if (Math.hypot(x - UCX, y - UCY) < 6) continue;
+    const len = randi(8, 24);
+    for (let k = 0; k < len; k++) {
+      const i = Math.round(y) * UW + Math.round(x);
+      if (g[i] === U.DIRT) g[i] = U.ROOT;
+      a += rand(-0.6, 0.6); x = clamp(x + Math.cos(a), 3, UW - 4); y = clamp(y + Math.sin(a), 3, UH - 4);
+    }
+  }
+  for (let ty = UCY - 2; ty < UCY + 2; ty++) for (let tx = UCX - 2; tx < UCX + 2; tx++) g[ty * UW + tx] = U.OPEN;
+  g[UENT.ty * UW + UENT.tx] = U.ENT;
+  return g;
 }
 
-function genRocks() {
-  rocks = [];
+function inRock(w, x, y, pad) {
+  for (const o of w.rocks) if (Math.hypot(o.x - x, o.y - y) < o.r + pad) return true;
+  return false;
+}
+function genSurface(w) {
   let tries = 0;
-  while (rocks.length < 45 && tries < 2000) {
-    tries++;
-    const r = rand(30, 90);
-    const x = rand(r, W - r), y = rand(r, H - r);
-    if (Math.hypot(x - NEST.x, y - NEST.y) < NEST.r + r + 140) continue;
-    if (rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 50)) continue;
-    rocks.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
+  while (w.rocks.length < 160 && tries++ < 4000) {
+    const r = rand(18, 64), x = rand(r, SW * T - r), y = rand(r, SH * T - r);
+    if (Math.hypot(x - NEST.x, y - NEST.y) < 260) continue;
+    if (w.rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 40)) continue;
+    w.rocks.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
+  }
+  tries = 0;
+  while (w.dens.length < 10 && tries++ < 2000) {
+    const x = rand(100, SW * T - 100), y = rand(100, SH * T - 100);
+    const d = Math.hypot(x - NEST.x, y - NEST.y) / T;
+    if (d < 40) continue;
+    if (inRock(w, x, y, 40) || w.dens.some(o => Math.hypot(o.x - x, o.y - y) < 600)) continue;
+    w.dens.push({ x: Math.round(x), y: Math.round(y) });
+  }
+  for (let c = 0; c < 55; c++) {           // 草むら
+    const cx = randi(4, SW - 5), cy = randi(4, SH - 5);
+    if (Math.hypot((cx + 0.5) * T - NEST.x, (cy + 0.5) * T - NEST.y) < 120) continue;
+    const n = randi(5, 12);
+    for (let k = 0; k < n; k++) {
+      const tx = clamp(cx + randi(-2, 2), 1, SW - 2), ty = clamp(cy + randi(-2, 2), 1, SH - 2);
+      if (inRock(w, (tx + 0.5) * T, (ty + 0.5) * T, 6)) continue;
+      w.grass.set(ty * SW + tx, randi(0, 3));
+    }
   }
 }
-const insideRock = (x, y, pad) => rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + pad);
-
-function resolve(e, rad) {
-  for (const o of rocks) {
-    const dx = e.x - o.x, dy = e.y - o.y, d = Math.hypot(dx, dy), min = o.r + rad;
-    if (d < min && d > 0.001) { e.x = o.x + dx / d * min; e.y = o.y + dy / d * min; }
+function randomSurfacePoint(w, z) {
+  for (let k = 0; k < 60; k++) {
+    const x = rand(2 * T, SW * T - 2 * T), y = rand(2 * T, SH * T - 2 * T);
+    if (zoneOf(x, y) !== z) continue;
+    if (Math.hypot(x - NEST.x, y - NEST.y) < 120) continue;
+    if (inRock(w, x, y, 12)) continue;
+    if (w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
+    return { x: Math.round(x), y: Math.round(y) };
   }
-  e.x = clamp(e.x, rad, W - rad);
-  e.y = clamp(e.y, rad, H - rad);
+  return null;
 }
-
-// ---- 食べ物 ----
-function spawnFood(t, x, y) {
-  foods.push({ id: nextId++, t, x, y, r: FOOD_TYPES[t].r, v: FOOD_TYPES[t].v });
+function spawnRes(w, r) {
+  const pt = randomSurfacePoint(w, r.z);
+  if (!pt) return;
+  const key = r.z + ':' + r.item;
+  w.resCount[key] = (w.resCount[key] || 0) + 1;
+  addGroundItem(w, { layer: 's', x: pt.x, y: pt.y, item: r.item, n: 1, res: key });
 }
-function spawnFoodCluster() {
-  let x, y, tries = 0;
-  do {
-    x = rand(40, W - 40); y = rand(40, H - 40); tries++;
-  } while ((insideRock(x, y, 30) || Math.hypot(x - NEST.x, y - NEST.y) < 250) && tries < 50);
-  const roll = Math.random();
-  const t = roll < 0.6 ? 0 : roll < 0.9 ? 1 : 2;
-  const n = t === 2 ? 1 : 3 + Math.floor(Math.random() * 4);
-  for (let i = 0; i < n; i++) {
-    const fx = clamp(x + rand(-40, 40), 20, W - 20), fy = clamp(y + rand(-40, 40), 20, H - 20);
-    if (!insideRock(fx, fy, 10)) spawnFood(t, fx, fy);
+function spawnSugarNodes(w) {
+  let have = 0;
+  for (const o of w.objs.s.values()) if (o.t === 'sugarNode') have++;
+  for (let k = 0; k < 200 && have < SUGAR_NODES; k++) {
+    const pt = randomSurfacePoint(w, 3);
+    if (!pt) continue;
+    const idx = Math.floor(pt.y / T) * SW + Math.floor(pt.x / T);
+    if (w.objs.s.has(idx)) continue;
+    setObj(w, 's', idx, { t: 'sugarNode', hp: OBJ.sugarNode.hp });
+    have++;
   }
 }
 
-// ---- プレイヤー ----
-function spawnPlayer(p) {
-  p.x = NEST.x + rand(-30, 30); p.y = NEST.y + rand(-30, 30);
-  p.hp = 100; p.hunger = 100; p.carry = 0; p.dead = false; p.respawn = 0;
+function createWorld(code) {
+  const seed = Math.floor(Math.random() * 1e9);
+  const w = baseWorld(code);
+  w.seed = seed;
+  genSurface(w);
+  w.under = genUnder(seed);
+  for (const r of RES) for (let k = 0; k < r.n; k++) spawnRes(w, r);
+  spawnSugarNodes(w);
+  recomputeSupport(w);
+  return w;
 }
-function killPlayer(p, why) {
-  p.dead = true; p.respawn = 5;
-  for (let i = 0; i < p.carry; i++) spawnFood(0, p.x + rand(-20, 20), p.y + rand(-20, 20));
-  p.carry = 0;
-  msg(`${p.name} が${why}`);
+function baseWorld(code) {
+  return {
+    code, seed: 0, day: 1, time: 0, isNight: false, rain: 0,
+    rocks: [], dens: [], grass: new Map(), under: null, objs: { s: new Map(), u: new Map() },
+    items: new Map(), resCount: {}, saved: {}, players: {}, enemies: [], cracks: new Map(),
+    nextId: 1, tileQ: [], grassQ: [], objQ: new Map(), gameOver: false,
+    flowP: null, flowE: null, flowT: 0, secT: 1, saveT: 0, tickN: 0, saving: false,
+  };
 }
 
-function handleAction(p, type) {
-  if (!p || p.dead || gameOver) return;
-  const atNest = dist(p, NEST) < NEST.r;
-  if (type === 'bite') {
-    if (p.biteCd > 0) return;
-    p.biteCd = 0.35; p.biteAnim = 0.15;
-    const fx = p.x + Math.cos(p.a) * 22, fy = p.y + Math.sin(p.a) * 22;
-    for (const e of enemies) {
-      if (Math.hypot(e.x - fx, e.y - fy) < e.r + 18) {
-        e.hp -= 12; e.hitT = 0.15;
-        const kd = Math.atan2(e.y - p.y, e.x - p.x);
-        e.x += Math.cos(kd) * 10; e.y += Math.sin(kd) * 10;
-        if (e.hp <= 0) killEnemy(e, p);
+// ================= 保存（MongoDB or ローカルファイル） =================
+let mongoCol = null;
+async function initDB() {
+  if (!process.env.MONGODB_URI) { console.log('MONGODB_URI未設定：saves/ フォルダに保存します'); return; }
+  try {
+    const { MongoClient } = require('mongodb');
+    const c = new MongoClient(process.env.MONGODB_URI);
+    await c.connect();
+    mongoCol = c.db('antsurvival').collection('worlds');
+    console.log('MongoDBに接続しました');
+  } catch (e) { console.error('MongoDB接続失敗。ファイル保存に切り替えます', e.message); }
+}
+async function dbLoad(code) {
+  if (mongoCol) { const d = await mongoCol.findOne({ _id: code }); return d ? d.data : null; }
+  const f = path.join(SAVE_DIR, code + '.json');
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+}
+async function dbSave(code, data) {
+  if (mongoCol) { await mongoCol.updateOne({ _id: code }, { $set: { data, updatedAt: new Date() } }, { upsert: true }); return; }
+  fs.mkdirSync(SAVE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(SAVE_DIR, code + '.json'), JSON.stringify(data));
+}
+async function dbDelete(code) {
+  if (mongoCol) { await mongoCol.deleteOne({ _id: code }); return; }
+  const f = path.join(SAVE_DIR, code + '.json');
+  if (fs.existsSync(f)) fs.unlinkSync(f);
+}
+function playerSave(p) {
+  if (p.dead) return { inv: new Array(INV_SIZE).fill(null), hp: 100, hunger: 70, layer: 'u', x: UCX * T, y: UCY * T };
+  return { inv: p.inv, hp: p.hp, hunger: p.hunger, layer: p.layer, x: p.x, y: p.y };
+}
+function serialize(w) {
+  for (const p of Object.values(w.players)) w.saved[p.name] = playerSave(p);
+  const items = [...w.items.values()].map(({ id, ...rest }) => rest).filter(i => !i.noPickUntil || true);
+  return {
+    v: 1, seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId,
+    rocks: w.rocks, dens: w.dens, grass: [...w.grass],
+    under: Buffer.from(w.under).toString('base64'),
+    objs: { s: [...w.objs.s], u: [...w.objs.u] },
+    items, saved: w.saved,
+  };
+}
+function deserialize(code, d) {
+  const w = baseWorld(code);
+  Object.assign(w, { seed: d.seed, day: d.day, time: d.time, isNight: d.isNight, nextId: d.nextId || 1, rocks: d.rocks, dens: d.dens, saved: d.saved || {} });
+  w.grass = new Map(d.grass);
+  w.under = new Uint8Array(Buffer.from(d.under, 'base64'));
+  w.objs = { s: new Map(d.objs.s), u: new Map(d.objs.u) };
+  for (const it of d.items) {
+    delete it.noPickId; delete it.noPickUntil;
+    it.id = w.nextId++;
+    w.items.set(it.id, it);
+    if (it.res) w.resCount[it.res] = (w.resCount[it.res] || 0) + 1;
+  }
+  recomputeSupport(w);
+  return w;
+}
+async function saveWorld(w) {
+  if (w.saving || w.gameOver) return;
+  w.saving = true;
+  try { await dbSave(w.code, serialize(w)); } catch (e) { console.error('保存失敗', w.code, e.message); }
+  w.saving = false;
+}
+
+// ================= 部屋 =================
+const rooms = {}, loading = {};
+async function getWorld(code, allowCreate) {
+  if (rooms[code]) return rooms[code];
+  if (!loading[code]) {
+    loading[code] = (async () => {
+      const d = await dbLoad(code).catch(() => null);
+      if (d) return deserialize(code, d);
+      if (!allowCreate) return null;
+      const w = createWorld(code);
+      await dbSave(code, serialize(w)).catch(() => {});
+      return w;
+    })();
+  }
+  const w = await loading[code];
+  delete loading[code];
+  if (w && !rooms[code]) rooms[code] = w;
+  return rooms[code] || null;
+}
+
+// ================= 送信ヘルパー =================
+const msg = (w, text) => io.to(w.code).emit('msg', text);
+const msgTo = (p, text) => io.to(p.id).emit('msg', text);
+const compactItem = it => [it.id, it.layer === 'u' ? 1 : 0, it.x, it.y, it.bag ? 'bag' : it.item, it.n || 0];
+function addGroundItem(w, it) {
+  it.id = w.nextId++;
+  w.items.set(it.id, it);
+  io.to(w.code).emit('item+', compactItem(it));
+  return it;
+}
+function removeGroundItem(w, id) {
+  const it = w.items.get(id);
+  if (!it) return;
+  if (it.res) w.resCount[it.res]--;
+  w.items.delete(id);
+  io.to(w.code).emit('item-', id);
+}
+function dropItems(w, layer, x, y, stacks) {
+  const list = stacks.filter(Boolean);
+  if (!list.length) return;
+  if (list.length === 1) addGroundItem(w, { layer, x, y, item: list[0].id, n: list[0].n });
+  else addGroundItem(w, { layer, x, y, bag: list.map(s => ({ id: s.id, n: s.n })) });
+}
+function give(w, p, id, n) {
+  const left = addItem(p.inv, id, n);
+  if (left) dropItems(w, p.layer, p.x, p.y, [{ id, n: left }]);
+}
+const emitInv = p => io.to(p.id).emit('inv', { inv: p.inv, sel: p.sel });
+function setObj(w, l, idx, o) {
+  if (o) w.objs[l].set(idx, o); else w.objs[l].delete(idx);
+  w.objQ.set(l + idx, { l, i: idx, o: o ? { t: o.t, hp: Math.round(o.hp) } : null });
+}
+
+// ================= 衝突 =================
+function solidAt(w, l, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return true;
+  const idx = ty * LW(l) + tx;
+  if (l === 'u' && isNatSolid(w.under[idx])) return true;
+  const o = w.objs[l].get(idx);
+  return !!(o && OBJ[o.t].solid);
+}
+function collide(w, l, e, r) {
+  let hit = null;
+  if (l === 's') for (const o of w.rocks) {
+    const dx = e.x - o.x, dy = e.y - o.y, min = o.r + r;
+    if (Math.abs(dx) < min && Math.abs(dy) < min) {
+      const d = Math.hypot(dx, dy);
+      if (d < min && d > 0.001) { e.x = o.x + dx / d * min; e.y = o.y + dy / d * min; }
+    }
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const tx0 = Math.floor((e.x - r) / T), tx1 = Math.floor((e.x + r) / T);
+    const ty0 = Math.floor((e.y - r) / T), ty1 = Math.floor((e.y + r) / T);
+    for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+      if (!solidAt(w, l, tx, ty)) continue;
+      const cx = clamp(e.x, tx * T, tx * T + T), cy = clamp(e.y, ty * T, ty * T + T);
+      let dx = e.x - cx, dy = e.y - cy, d = Math.hypot(dx, dy);
+      if (d >= r) continue;
+      if (d < 0.001) {
+        const mx = e.x - (tx + 0.5) * T, my = e.y - (ty + 0.5) * T;
+        if (Math.abs(mx) > Math.abs(my)) { e.x = mx > 0 ? tx * T + T + r : tx * T - r; }
+        else { e.y = my > 0 ? ty * T + T + r : ty * T - r; }
+      } else { e.x = cx + dx / d * r; e.y = cy + dy / d * r; }
+      hit = { tx, ty };
+    }
+  }
+  e.x = clamp(e.x, r, LW(l) * T - r);
+  e.y = clamp(e.y, r, LH(l) * T - r);
+  return hit;
+}
+function circleHitsTile(x, y, r, tx, ty) {
+  const cx = clamp(x, tx * T, tx * T + T), cy = clamp(y, ty * T, ty * T + T);
+  return Math.hypot(x - cx, y - cy) < r;
+}
+
+// ================= 崩落 =================
+function recomputeSupport(w) {
+  const g = w.under, pillars = [];
+  for (const [i, o] of w.objs.u) if (OBJ[o.t].support) pillars.push([i % UW, (i / UW) | 0, OBJ[o.t].support]);
+  const R = SUPPORT_RANGE;
+  for (let ty = 0; ty < UH; ty++) for (let tx = 0; tx < UW; tx++) {
+    const i = ty * UW + tx;
+    if (g[i] !== U.OPEN) { w.cracks.delete(i); continue; }
+    let ok = false;
+    for (let dy = -R; dy <= R && !ok; dy++) for (let dx = -R; dx <= R; dx++) {
+      const x = tx + dx, y = ty + dy;
+      if (x < 0 || y < 0 || x >= UW || y >= UH || isNatSolid(g[y * UW + x])) { ok = true; break; }
+    }
+    if (!ok) for (const [px, py, r] of pillars) if ((px - tx) ** 2 + (py - ty) ** 2 <= r * r + 0.5) { ok = true; break; }
+    if (ok) w.cracks.delete(i);
+    else if (!w.cracks.has(i)) w.cracks.set(i, CRACK_TIME);
+  }
+}
+function collapseTile(w, i) {
+  w.under[i] = U.RUBBLE;
+  w.cracks.delete(i);
+  w.tileQ.push([i, U.RUBBLE]);
+  const tx = i % UW, ty = (i / UW) | 0;
+  if (w.objs.u.has(i)) setObj(w, 'u', i, null);            // 置いてあった物は消える（中身ごと）
+  for (const it of [...w.items.values()]) {
+    if (it.layer === 'u' && Math.floor(it.x / T) === tx && Math.floor(it.y / T) === ty) removeGroundItem(w, it.id);
+  }
+  for (const p of Object.values(w.players)) {
+    if (!p.dead && p.layer === 'u' && circleHitsTile(p.x, p.y, PR * 0.7, tx, ty)) killPlayer(w, p, '崩落に巻き込まれた…', true);
+  }
+  for (const e of w.enemies) if (e.layer === 'u' && circleHitsTile(e.x, e.y, 6, tx, ty)) e.dead = true;
+}
+function updateCracks(w) {
+  if (!w.cracks.size) return;
+  let fell = [];
+  for (const [i, t] of w.cracks) {
+    const nt = t - DT;
+    if (nt <= 0) fell.push(i); else w.cracks.set(i, nt);
+  }
+  if (fell.length) {
+    for (const i of fell) collapseTile(w, i);
+    io.to(w.code).emit('collapse', fell);
+    recomputeSupport(w);
+    w.enemies = w.enemies.filter(e => !e.dead);
+  }
+}
+
+// ================= プレイヤー =================
+function makePlayer(w, id, name) {
+  const s = w.saved[name];
+  const p = {
+    id, name, color: COLORS[Object.keys(w.players).length % COLORS.length],
+    layer: 'u', x: UCX * T, y: UCY * T, a: 0, hp: 100, hunger: 100,
+    inv: new Array(INV_SIZE).fill(null), sel: 0, dead: false, respawn: 0,
+    ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
+  };
+  if (s) Object.assign(p, { inv: s.inv, hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y });
+  else addItem(p.inv, 'crumb', 5);
+  return p;
+}
+function teleport(p, l, x, y) {
+  p.layer = l; p.x = x; p.y = y; p.tpSeq++; p.dig = null; p.openChest = null;
+  io.to(p.id).emit('tp', { s: p.tpSeq, l, x, y });
+}
+function killPlayer(w, p, why, buried) {
+  if (p.dead) return;
+  p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false;
+  if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), p.inv);   // 持ち物をその場に落とす
+  p.inv = new Array(INV_SIZE).fill(null);
+  emitInv(p);
+  msg(w, `💀 ${p.name}が${why}${buried ? '（持ち物は土の中に消えた）' : ''}`);
+}
+function respawnPlayer(w, p) {
+  p.dead = false; p.hp = 100; p.hunger = 70;
+  teleport(p, 'u', UCX * T, UCY * T);
+}
+function nearBench(w, p) {
+  for (const [i, o] of w.objs[p.layer]) {
+    if (o.t !== 'bench') continue;
+    const tx = i % LW(p.layer), ty = Math.floor(i / LW(p.layer));
+    if (Math.hypot((tx + 0.5) * T - p.x, (ty + 0.5) * T - p.y) < T * 3.5) return true;
+  }
+  return false;
+}
+function canPlace(w, l, tx, ty, t) {
+  if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return false;
+  const idx = ty * LW(l) + tx, cx = (tx + 0.5) * T, cy = (ty + 0.5) * T;
+  if (l === 'u') {
+    if (w.under[idx] !== U.OPEN) return false;
+  } else {
+    if (inRock(w, cx, cy, 6)) return false;
+    if (Math.hypot(cx - NEST.x, cy - NEST.y) < NEST.r + 24) return false;
+    if (w.dens.some(d => Math.hypot(d.x - cx, d.y - cy) < 50)) return false;
+  }
+  if (w.objs[l].has(idx)) return false;
+  if (OBJ[t].solid) {
+    for (const p of Object.values(w.players)) if (!p.dead && p.layer === l && circleHitsTile(p.x, p.y, PR, tx, ty)) return false;
+    for (const e of w.enemies) if (e.layer === l && circleHitsTile(e.x, e.y, EN[e.type].r * 0.8, tx, ty)) return false;
+  }
+  return true;
+}
+function destroyObj(w, l, idx, byPlayer) {
+  const o = w.objs[l].get(idx);
+  if (!o) return;
+  const tx = idx % LW(l), ty = Math.floor(idx / LW(l));
+  const cx = (tx + 0.5) * T, cy = (ty + 0.5) * T;
+  setObj(w, l, idx, null);
+  if (o.items) dropItems(w, l, cx, cy, o.items);
+  if (byPlayer) {
+    if (o.t === 'sugarNode') give(w, byPlayer, 'sugar', 4);
+    else give(w, byPlayer, o.t, 1);
+    emitInv(byPlayer);
+  } else if (o.t !== 'sugarNode') msg(w, `⚠ ${ITEMS[o.t].n}が壊された！`);
+  if (OBJ[o.t].support) recomputeSupport(w);
+}
+function damageObj(w, l, idx, amount) {
+  const o = w.objs[l].get(idx);
+  if (!o) return;
+  o.hp -= amount;
+  if (o.hp <= 0) destroyObj(w, l, idx, null);
+  else w.objQ.set(l + idx, { l, i: idx, o: { t: o.t, hp: Math.round(o.hp) } });
+}
+
+function handleHold(w, p) {
+  if (Math.hypot(p.ax - p.x, p.ay - p.y) > REACH + 8) { p.dig = null; return; }
+  const jawLv = bestJaw(p.inv), jaw = JAW[jawLv];
+  // 1) 敵を攻撃
+  if (p.atkCd <= 0) {
+    for (const e of w.enemies) {
+      if (e.layer !== p.layer) continue;
+      const r = EN[e.type].r;
+      if (Math.hypot(e.x - p.ax, e.y - p.ay) < r + 14 && Math.hypot(e.x - p.x, e.y - p.y) < REACH + r) {
+        p.atkCd = 0.4; p.biteT = 0.15;
+        e.hp -= jaw.atk; e.hitT = 0.15;
+        const k = Math.atan2(e.y - p.y, e.x - p.x);
+        e.x += Math.cos(k) * 8; e.y += Math.sin(k) * 8;
+        collide(w, e.layer, e, r * 0.8);
+        if (e.hp <= 0) killEnemy(w, e);
+        p.dig = null;
+        return;
       }
     }
-  } else if (type === 'eat') {
-    if (p.hunger >= 99) return;
-    if (p.carry > 0) { p.carry--; p.hunger = Math.min(100, p.hunger + 20); }
-    else if (atNest && colony.food >= 1) { colony.food--; p.hunger = Math.min(100, p.hunger + 20); }
-  } else if (type === 'hatch') {
-    if (atNest && colony.food >= HATCH_COST && workers.length < MAX_WORKERS) {
-      colony.food -= HATCH_COST;
-      workers.push({ id: nextId++, x: NEST.x, y: NEST.y, a: rand(0, 6.28), hp: 20, carry: 0, target: null, wt: 0 });
-      msg(`${p.name} が働きアリを誕生させた！（${workers.length}匹）`);
+  }
+  // 2) 置物・地面・草
+  const l = p.layer, tx = Math.floor(p.ax / T), ty = Math.floor(p.ay / T);
+  if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return;
+  const idx = ty * LW(l) + tx;
+  const o = w.objs[l].get(idx);
+  let kind, hard;
+  if (o) { kind = 'o'; hard = OBJ[o.t].hp; }
+  else if (l === 'u') {
+    const info = TILE_INFO[w.under[idx]];
+    if (!info) { p.dig = null; return; }
+    if (info.jaw && jawLv < info.jaw) {
+      if (p.warnT <= 0) { msgTo(p, '粘土を掘るには「小石の大あご」が必要'); p.warnT = 3; }
+      p.dig = null; return;
     }
-  } else if (type === 'repair') {
-    if (atNest && colony.food >= REPAIR_COST && colony.nestHp < colony.maxNestHp) {
-      colony.food -= REPAIR_COST;
-      colony.nestHp = Math.min(colony.maxNestHp, colony.nestHp + 15);
-    }
+    kind = 't'; hard = info.h;
+  } else {
+    const g = w.grass.get(idx);
+    if (g === undefined || g < 2) { p.dig = null; return; }
+    kind = 'g'; hard = 4;
+  }
+  if (!p.dig || p.dig.idx !== idx || p.dig.kind !== kind) p.dig = { idx, kind, prog: 0, hard };
+  p.dig.prog += jaw.dig * DT;
+  p.biteT = 0.1;
+  if (p.dig.prog < hard) return;
+  p.dig = null;
+  if (kind === 'o') destroyObj(w, l, idx, p);
+  else if (kind === 't') {
+    for (const [id, n] of TILE_INFO[w.under[idx]].drop) give(w, p, id, n);
+    w.under[idx] = U.OPEN;
+    w.tileQ.push([idx, U.OPEN]);
+    recomputeSupport(w);
+    emitInv(p);
+  } else {
+    const g = w.grass.get(idx);
+    give(w, p, 'grass', g === 3 ? 3 : 1);
+    if (g === 3 && Math.random() < 0.3) give(w, p, 'seed', 1);
+    w.grass.set(idx, 0); w.grassQ.push([idx, 0]);
+    emitInv(p);
   }
 }
 
-// ---- 敵 ----
-function spawnEnemy(type, raid) {
-  const s = ENEMY[type];
-  let x, y, tries = 0;
-  do {
-    const side = Math.floor(Math.random() * 4);
-    x = side === 0 ? 30 : side === 1 ? W - 30 : rand(30, W - 30);
-    y = side === 2 ? 30 : side === 3 ? H - 30 : rand(30, H - 30);
-    tries++;
-  } while (insideRock(x, y, s.r) && tries < 20);
-  enemies.push({ id: nextId++, type, x, y, a: 0, hp: s.hp, maxHp: s.hp, raid, atkCd: 0, wa: rand(0, 6.28), wt: 0, hitT: 0 });
+function updatePlayers(w) {
+  for (const p of Object.values(w.players)) {
+    if (p.dead) { p.respawn -= DT; if (p.respawn <= 0) respawnPlayer(w, p); continue; }
+    p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT;
+    p.hunger -= 0.28 * DT;
+    if (p.hunger <= 0) { p.hunger = 0; p.hp -= 3 * DT; }
+    else if (p.hunger > 50) p.hp = Math.min(100, p.hp + 1 * DT);
+    // 拾う
+    let changed = false;
+    for (const it of w.items.values()) {
+      if (it.layer !== p.layer || Math.abs(it.x - p.x) > 22 || Math.abs(it.y - p.y) > 22) continue;
+      if (it.noPickId === p.id && Date.now() < it.noPickUntil) continue;
+      if (it.bag) {
+        for (const s of it.bag) if (s.n) { s.n = addItem(p.inv, s.id, s.n); changed = true; }
+        it.bag = it.bag.filter(s => s.n > 0);
+        if (!it.bag.length) removeGroundItem(w, it.id);
+      } else {
+        const left = addItem(p.inv, it.item, it.n);
+        if (left < it.n) { changed = true; if (left) it.n = left; else removeGroundItem(w, it.id); }
+      }
+    }
+    if (changed) emitInv(p);
+    if (p.lmb) handleHold(w, p); else p.dig = null;
+    if (p.hp <= 0) killPlayer(w, p, p.hunger <= 0 ? '飢え死にした…' : '力尽きた…');
+  }
 }
-function killEnemy(e, p) {
+
+// ================= 敵 =================
+function buildFlow(w, sources) {
+  const N = UW * UH, d = new Float32Array(N).fill(1e9);
+  const heap = [];
+  const push = (v, i) => { heap.push([v, i]); let k = heap.length - 1; while (k > 0) { const q = (k - 1) >> 1; if (heap[q][0] <= heap[k][0]) break; [heap[q], heap[k]] = [heap[k], heap[q]]; k = q; } };
+  const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let k = 0; for (;;) { const a = 2 * k + 1, b = a + 1; let m = k; if (a < heap.length && heap[a][0] < heap[m][0]) m = a; if (b < heap.length && heap[b][0] < heap[m][0]) m = b; if (m === k) break; [heap[m], heap[k]] = [heap[k], heap[m]]; k = m; } } return top; };
+  for (const s of sources) { d[s] = 0; push(0, s); }
+  while (heap.length) {
+    const [v, i] = pop();
+    if (v > d[i]) continue;
+    const x = i % UW, y = (i / UW) | 0;
+    for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+      if (nx < 0 || ny < 0 || nx >= UW || ny >= UH) continue;
+      const j = ny * UW + nx;
+      if (isNatSolid(w.under[j])) continue;
+      const o = w.objs.u.get(j);
+      const nv = v + (o && OBJ[o.t].solid ? 10 : 1);
+      if (nv < d[j]) { d[j] = nv; push(nv, j); }
+    }
+  }
+  return d;
+}
+function spawnEnemy(w, type, den, raider) {
+  const s = EN[type];
+  w.enemies.push({
+    id: w.nextId++, type, layer: 's', x: den.x + rand(-20, 20), y: den.y + rand(-20, 20), a: rand(0, 6.28),
+    hp: s.hp, maxHp: s.hp, atkCd: 0, hitT: 0, raider, retreat: false, home: den, wa: rand(0, 6.28), wt: 0, avoidT: 0, avoidDir: 0, life: 0,
+  });
+}
+function killEnemy(w, e) {
   e.dead = true;
-  const s = ENEMY[e.type];
-  for (let i = 0; i < s.drop; i++) spawnFood(3, e.x + rand(-15, 15), e.y + rand(-15, 15));
-  if (p) p.score += e.type === 'spider' ? 3 : 5;
+  for (const [id, a, b] of EN[e.type].drops) {
+    const n = randi(a, b);
+    for (let k = 0; k < n; k++) addGroundItem(w, { layer: e.layer, x: Math.round(e.x + rand(-12, 12)), y: Math.round(e.y + rand(-12, 12)), item: id, n: 1 });
+  }
 }
-
-function updateEnemies() {
-  for (const e of enemies) {
+function updateEnemies(w) {
+  const alive = Object.values(w.players).filter(p => !p.dead);
+  const under = w.enemies.filter(e => e.layer === 'u');
+  if (under.length) {
+    w.flowT -= DT;
+    if (w.flowT <= 0) {
+      w.flowT = 0.5;
+      const src = alive.filter(p => p.layer === 'u').map(p => Math.floor(p.y / T) * UW + Math.floor(p.x / T));
+      w.flowP = src.length ? buildFlow(w, src) : null;
+      w.flowE = under.some(e => e.retreat) ? buildFlow(w, [UENT.ty * UW + UENT.tx]) : null;
+    }
+  }
+  for (const e of w.enemies) {
     if (e.dead) continue;
-    const s = ENEMY[e.type];
-    e.atkCd -= DT; e.hitT -= DT;
-    // ターゲット探し（プレイヤー＋働きアリ）
-    let target = null, best = s.detect;
-    for (const id in players) {
-      const p = players[id];
-      if (p.dead) continue;
-      const d = dist(p, e);
-      if (d < best) { best = d; target = p; }
-    }
-    for (const w of workers) {
-      const d = dist(w, e);
-      if (d < best) { best = d; target = w; }
-    }
-    let tx = null, ty = null;
-    if (target) { tx = target.x; ty = target.y; }
-    else if (e.raid) { tx = NEST.x; ty = NEST.y; }
+    const s = EN[e.type];
+    e.atkCd -= DT; e.hitT -= DT; e.avoidT -= DT; e.life += DT;
+    if (e.retreat && e.life > 400) { e.dead = true; continue; }
+    // 足元の罠
+    const ltw = LW(e.layer), ftx = Math.floor(e.x / T), fty = Math.floor(e.y / T), fidx = fty * ltw + ftx;
+    const fo = w.objs[e.layer].get(fidx);
+    let spd = s.spd;
+    if (fo && fo.t === 'net') { spd *= 0.35; damageObj(w, e.layer, fidx, 1 * DT); }
+    if (fo && fo.t === 'spike') { e.hp -= 18 * DT; e.hitT = 0.05; damageObj(w, e.layer, fidx, 2 * DT); }
+    if (e.hp <= 0) { killEnemy(w, e); continue; }
 
-    if (tx !== null) {
-      const d = Math.hypot(tx - e.x, ty - e.y);
-      e.a = Math.atan2(ty - e.y, tx - e.x);
-      const reach = target ? e.r + 12 : NEST.r + e.r * 0.5;
-      if (d > reach) {
-        e.x += Math.cos(e.a) * s.spd * DT; e.y += Math.sin(e.a) * s.spd * DT;
-      } else if (target && e.atkCd <= 0) {
+    // ターゲット
+    let tgt = null, best = s.detect;
+    if (!e.retreat) for (const p of alive) {
+      if (p.layer !== e.layer) continue;
+      const d = dist(p, e);
+      if (d < best) { best = d; tgt = p; }
+    }
+    if (tgt && best < s.r + PR + 6) {
+      e.a = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+      if (e.atkCd <= 0) {
         e.atkCd = 1.0;
-        target.hp -= s.dmg;
-        if (target.hp <= 0) {
-          if (target.name !== undefined) killPlayer(target, `${e.type === 'spider' ? 'クモ' : 'カブトムシ'}にやられた…`);
-          else target.dead = true;
-        }
-      } else if (!target) {
-        colony.nestHp -= 4 * DT; // 巣を攻撃
+        tgt.hp -= s.dmg * (1 - bestArmor(tgt.inv));
+        if (tgt.hp <= 0) killPlayer(w, tgt, `${s.n}にやられた…`);
       }
+      continue;
+    }
+    let gx = null, gy = null, chew = -1;
+    if (e.layer === 's') {
+      if (tgt) { gx = tgt.x; gy = tgt.y; }
+      else if (e.retreat || (!e.raider && dist(e, e.home) > 260)) {
+        gx = e.home.x; gy = e.home.y;
+        if (e.retreat && dist(e, e.home) < 26) { e.dead = true; continue; }
+      } else if (e.raider && w.isNight) {
+        gx = NEST.x; gy = NEST.y;
+        if (dist(e, NEST) < NEST.r) { e.layer = 'u'; e.x = UENT_X; e.y = UENT_Y; continue; }   // 巣に侵入！
+      }
+    } else {
+      if (tgt && best < T * 1.6) { gx = tgt.x; gy = tgt.y; }
+      else {
+        const flow = e.retreat ? w.flowE : w.flowP;
+        const ti = fty * UW + ftx;
+        if (e.retreat && ti === UENT.ty * UW + UENT.tx) { e.layer = 's'; e.x = NEST.x; e.y = NEST.y + NEST.r + 10; continue; }
+        if (flow && flow[ti] < 1e8) {
+          let bj = -1, bv = flow[ti];
+          for (const [nx, ny] of [[ftx + 1, fty], [ftx - 1, fty], [ftx, fty + 1], [ftx, fty - 1]]) {
+            const j = ny * UW + nx;
+            if (flow[j] < bv) { bv = flow[j]; bj = j; }
+          }
+          if (bj >= 0) {
+            const o = w.objs.u.get(bj);
+            if (o && OBJ[o.t].solid) chew = bj;
+            gx = (bj % UW + 0.5) * T; gy = ((bj / UW | 0) + 0.5) * T;
+          }
+        }
+      }
+    }
+    if (chew >= 0) {
+      e.a = Math.atan2(gy - e.y, gx - e.x);
+      damageObj(w, 'u', chew, s.chew * DT);
+      continue;
+    }
+    let ang, mv = spd;
+    if (gx !== null) {
+      ang = Math.atan2(gy - e.y, gx - e.x) + (e.avoidT > 0 ? e.avoidDir : 0);
     } else {
       e.wt -= DT;
       if (e.wt <= 0) { e.wa += rand(-1.5, 1.5); e.wt = rand(1, 3); }
-      e.a = e.wa;
-      e.x += Math.cos(e.wa) * s.spd * 0.35 * DT; e.y += Math.sin(e.wa) * s.spd * 0.35 * DT;
+      ang = e.wa; mv = spd * 0.35;
     }
-    const bx = e.x, by = e.y;
-    resolve(e, e.r * 0.7);
-    if (tx === null && (bx !== e.x || by !== e.y)) e.wa += Math.PI * 0.7;
+    e.a = ang;
+    const ox = e.x, oy = e.y;
+    e.x += Math.cos(ang) * mv * DT; e.y += Math.sin(ang) * mv * DT;
+    const hit = collide(w, e.layer, e, s.r * 0.8);
+    if (hit && gx !== null) {
+      const hidx = hit.ty * LW(e.layer) + hit.tx;
+      const o = w.objs[e.layer].get(hidx);
+      if (o && OBJ[o.t].solid && !OBJ[o.t].natural) { damageObj(w, e.layer, hidx, s.chew * DT); continue; }
+    }
+    if (Math.hypot(e.x - ox, e.y - oy) < mv * DT * 0.3) {
+      if (gx !== null && e.avoidT <= 0) { e.avoidT = 0.8; e.avoidDir = (Math.random() < 0.5 ? 1 : -1) * 1.3; }
+      if (gx === null) e.wa += Math.PI * 0.6;
+    }
   }
-  enemies = enemies.filter(e => !e.dead);
-  workers = workers.filter(w => {
-    if (w.dead || w.hp <= 0) { if (w.carry) spawnFood(0, w.x, w.y); return false; }
-    return true;
+  w.enemies = w.enemies.filter(e => !e.dead);
+}
+
+// ================= 環境（昼夜・雨・草・資源・湧き） =================
+function updateEnv(w) {
+  w.time += DT;
+  if (!w.isNight && w.time >= DAY_LEN) {
+    w.isNight = true; w.time = 0; w.rain = 0;
+    msg(w, `🌙 ${w.day}日目の夜。モンスターが巣穴から出てくる…`);
+  } else if (w.isNight && w.time >= NIGHT_LEN) {
+    w.isNight = false; w.time = 0; w.day++;
+    for (const e of w.enemies) if (e.raider) e.retreat = true;
+    spawnSugarNodes(w);
+    msg(w, `☀ ${w.day}日目の朝。モンスターが巣穴へ帰っていく`);
+  }
+  if (w.rain > 0) { w.rain -= DT; if (w.rain <= 0) msg(w, '雨がやんだ'); }
+
+  w.secT -= DT;
+  if (w.secT > 0) return;
+  w.secT = 1;
+  if (!w.isNight && w.rain <= 0 && Math.random() < 1 / 100) { w.rain = 30; msg(w, '☔ 雨が降ってきた。草がぐんぐん育つ！'); }
+  // 草の成長
+  const chance = w.rain > 0 ? 1 / 5 : 1 / 150;
+  for (const [i, g] of w.grass) if (g < 3 && Math.random() < chance) { w.grass.set(i, g + 1); w.grassQ.push([i, g + 1]); }
+  // 資源の補充
+  for (let k = 0; k < 2; k++) {
+    const r = RES[randi(0, RES.length - 1)];
+    if ((w.resCount[r.z + ':' + r.item] || 0) < r.n) spawnRes(w, r);
+  }
+  // モンスター
+  if (w.isNight) {
+    const cap = Math.min(36, 5 + w.day * 3);
+    const raiders = w.enemies.filter(e => e.raider && !e.retreat).length;
+    if (raiders < cap && Math.random() < 0.6) {
+      const den = w.dens[randi(0, w.dens.length - 1)];
+      spawnEnemy(w, Math.random() < Math.min(0.5, 0.15 + w.day * 0.04) ? 'beetle' : 'spider', den, true);
+    }
+  }
+  const guards = w.enemies.filter(e => !e.raider).length;
+  if (guards < 8 && Math.random() < 0.2) {
+    const far = w.dens.filter(d => zoneOf(d.x, d.y) === 3);
+    const den = (far.length ? far : w.dens)[randi(0, (far.length ? far : w.dens).length - 1)];
+    spawnEnemy(w, Math.random() < 0.4 ? 'beetle' : 'spider', den, false);
+  }
+}
+
+// ================= メインループ =================
+function broadcast(w) {
+  io.to(w.code).emit('st', {
+    p: Object.values(w.players).map(p => [
+      p.id, p.name, p.color, p.layer === 'u' ? 1 : 0, Math.round(p.x), Math.round(p.y), +p.a.toFixed(2),
+      Math.round(p.hp), Math.round(p.hunger), p.dead ? 1 : 0, Math.ceil(p.respawn), p.biteT > 0 ? 1 : 0,
+      p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, bestJaw(p.inv), bestArmor(p.inv),
+    ]),
+    e: w.enemies.map(e => [e.id, EN[e.type].idx, e.layer === 'u' ? 1 : 0, Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
+    k: [...w.cracks].map(([i, t]) => [i, +t.toFixed(1)]),
+    c: [w.day, +w.time.toFixed(1), w.isNight ? 1 : 0, w.rain > 0 ? 1 : 0],
   });
 }
+function flush(w) {
+  if (w.tileQ.length) { io.to(w.code).emit('tiles', w.tileQ); w.tileQ = []; }
+  if (w.grassQ.length) { io.to(w.code).emit('grass', w.grassQ); w.grassQ = []; }
+  if (w.objQ.size) { io.to(w.code).emit('objs', [...w.objQ.values()]); w.objQ.clear(); }
+}
+function gameOver(w) {
+  w.gameOver = true;
+  io.to(w.code).emit('gameover', { day: w.day });
+  dbDelete(w.code).catch(() => {});
+  setTimeout(() => {
+    const nw = createWorld(w.code);
+    for (const p of Object.values(w.players)) {
+      const np = makePlayer(nw, p.id, p.name);
+      nw.players[p.id] = np;
+      io.to(p.id).emit('world', fullSync(nw, np));
+    }
+    rooms[w.code] = nw;
+    msg(nw, '🐜 新しいワールドで再スタート！');
+    saveWorld(nw);
+  }, 7000);
+}
+function tickWorld(w) {
+  if (w.gameOver) return;
+  const ps = Object.values(w.players);
+  if (!ps.length) return;
+  w.tickN++;
+  updatePlayers(w);
+  updateEnemies(w);
+  updateCracks(w);
+  updateEnv(w);
+  flush(w);
+  if (ALL_DEAD_GAMEOVER && ps.every(p => p.dead)) { gameOver(w); return; }
+  if (w.tickN % 2 === 0) broadcast(w);
+  w.saveT += DT;
+  if (w.saveT >= SAVE_INTERVAL) { w.saveT = 0; saveWorld(w); }
+}
+setInterval(() => { for (const code in rooms) tickWorld(rooms[code]); }, 1000 / TICK);
 
-// ---- 働きアリ ----
-function updateWorkers() {
-  for (const w of workers) {
-    let tx, ty;
-    if (w.carry > 0) {
-      tx = NEST.x; ty = NEST.y;
-      if (dist(w, NEST) < NEST.r * 0.6) { colony.food += w.carry; w.carry = 0; w.target = null; }
-    } else {
-      if (w.target && !foods.includes(w.target)) w.target = null;
-      if (!w.target) {
-        let bestD = 700;
-        for (const f of foods) {
-          if (f.t === 2) continue; // 角砂糖は重すぎる
-          const d = dist(f, w);
-          if (d < bestD) { bestD = d; w.target = f; }
-        }
-      }
-      if (w.target) {
-        tx = w.target.x; ty = w.target.y;
-        if (dist(w, w.target) < w.target.r + 10) {
-          w.carry = w.target.v;
-          foods.splice(foods.indexOf(w.target), 1);
-          w.target = null;
-        }
-      }
-    }
-    if (tx !== undefined) {
-      w.a = Math.atan2(ty - w.y, tx - w.x);
-    } else {
-      w.wt -= DT;
-      if (w.wt <= 0) { w.a += rand(-1.2, 1.2); w.wt = rand(0.5, 2); }
-    }
-    w.x += Math.cos(w.a) * 105 * DT; w.y += Math.sin(w.a) * 105 * DT;
-    const bx = w.x, by = w.y;
-    resolve(w, 9);
-    if (bx !== w.x || by !== w.y) w.a += 0.4; // 岩に沿って回り込む
-  }
+function fullSync(w, p) {
+  return {
+    code: w.code, me: p.id,
+    defs: { T, SW, SH, UW, UH, NEST, UENT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, DAY_LEN, NIGHT_LEN, INV_SIZE, CHEST_SIZE, SUPPORT_RANGE },
+    rocks: w.rocks, dens: w.dens, grass: [...w.grass],
+    under: Buffer.from(w.under).toString('base64'),
+    objs: { s: [...w.objs.s].map(([i, o]) => [i, o.t, Math.round(o.hp)]), u: [...w.objs.u].map(([i, o]) => [i, o.t, Math.round(o.hp)]) },
+    items: [...w.items.values()].map(compactItem),
+    you: { l: p.layer, x: p.x, y: p.y, s: p.tpSeq },
+    inv: p.inv, sel: p.sel,
+  };
 }
 
-// ---- 雨 ----
-function updateRain() {
-  if (!colony.isNight && colony.rain <= 0 && colony.day >= 2 && Math.random() < DT / 45) {
-    colony.rain = 15;
-    msg('☔ 雨が降ってきた！巣に避難しろ！');
-  }
-  if (colony.rain > 0) {
-    colony.rain -= DT;
-    colony.rainSpawn -= DT;
-    if (colony.rainSpawn <= 0) {
-      colony.rainSpawn = 0.18;
-      const alive = Object.values(players).filter(p => !p.dead);
-      let x, y;
-      if (alive.length && Math.random() < 0.7) {
-        const p = alive[Math.floor(Math.random() * alive.length)];
-        x = p.x + rand(-350, 350); y = p.y + rand(-250, 250);
-      } else { x = rand(0, W); y = rand(0, H); }
-      if (Math.hypot(x - NEST.x, y - NEST.y) > NEST.r + 20) drops.push({ x, y, t: 1.4, max: 1.4, r: 45 });
-    }
-  }
-  for (const d of drops) {
-    d.t -= DT;
-    if (d.t <= 0) {
-      for (const id in players) {
-        const p = players[id];
-        if (!p.dead && dist(p, d) < d.r && dist(p, NEST) > NEST.r) {
-          p.hp -= 35;
-          if (p.hp <= 0) killPlayer(p, '雨粒に潰された…');
-        }
-      }
-      for (const w of workers) if (dist(w, d) < d.r) w.hp -= 25;
-      foods = foods.filter(f => dist(f, d) > d.r * 0.8);
-      io.emit('splash', { x: Math.round(d.x), y: Math.round(d.y), r: d.r });
-    }
-  }
-  drops = drops.filter(d => d.t > 0);
-}
-
-// ---- 昼夜 ----
-function updateDayCycle() {
-  colony.time += DT;
-  if (!colony.isNight && colony.time >= DAY_LEN) {
-    colony.isNight = true; colony.time = 0; colony.rain = 0;
-    msg(`🌙 ${colony.day}日目の夜。敵が巣を襲いにくる！`);
-  } else if (colony.isNight && colony.time >= NIGHT_LEN) {
-    colony.isNight = false; colony.time = 0; colony.day++;
-    for (const e of enemies) e.raid = false;
-    const need = Object.keys(players).length * 2 + workers.length;
-    if (colony.food >= need) {
-      colony.food -= need;
-      msg(`☀ ${colony.day}日目の朝。コロニーが食料を${need}消費した`);
-    } else {
-      const short = need - colony.food;
-      colony.food = 0;
-      colony.nestHp -= short * 4;
-      msg(`☀ ${colony.day}日目の朝。食料が${short}足りない！巣が弱っていく…`);
-    }
-  }
-}
-
-function updateSpawns() {
-  const want = Math.min(40, colony.isNight ? 6 + colony.day * 2 : 3 + colony.day);
-  if (enemies.length < want && Math.random() < (colony.isNight ? 0.08 : 0.02)) {
-    const beetleChance = Math.min(0.5, 0.15 + colony.day * 0.04);
-    spawnEnemy(Math.random() < beetleChance ? 'beetle' : 'spider', colony.isNight);
-  }
-  if (foods.length < FOOD_TARGET && Math.random() < 0.1) spawnFoodCluster();
-}
-
-// ---- プレイヤー更新 ----
-function updatePlayers() {
-  for (const id in players) {
-    const p = players[id];
-    if (p.dead) {
-      p.respawn -= DT;
-      if (p.respawn <= 0) spawnPlayer(p);
-      continue;
-    }
-    const len = Math.hypot(p.in.dx, p.in.dy);
-    if (len > 0.1) {
-      const spd = 175 * (1 - p.carry * 0.07);
-      p.x += p.in.dx / len * spd * DT; p.y += p.in.dy / len * spd * DT;
-      p.a = Math.atan2(p.in.dy, p.in.dx);
-    }
-    resolve(p, 12);
-    p.biteCd -= DT; p.biteAnim = Math.max(0, p.biteAnim - DT);
-
-    p.hunger -= (colony.isNight ? 1.2 : 0.9) * DT;
-    if (p.hunger <= 0) { p.hunger = 0; p.hp -= 4 * DT; }
-
-    const atNest = dist(p, NEST) < NEST.r;
-    if (atNest) {
-      if (p.carry > 0) { colony.food += p.carry; p.score += p.carry; p.carry = 0; }
-      if (p.hunger > 20) p.hp = Math.min(100, p.hp + 6 * DT);
-    } else if (p.hunger > 50) p.hp = Math.min(100, p.hp + 1 * DT);
-
-    // 拾う
-    for (let i = foods.length - 1; i >= 0; i--) {
-      const f = foods[i];
-      if (p.carry + f.v > MAX_CARRY) continue;
-      if (dist(p, f) < f.r + 14) { p.carry += f.v; foods.splice(i, 1); }
-    }
-    if (p.hp <= 0) killPlayer(p, '力尽きた…');
-  }
-}
-
-// ---- メインループ ----
-function resetWorld() {
-  foods = []; enemies = []; workers = []; drops = [];
-  colony = newColony();
-  for (let i = 0; i < 25; i++) spawnFoodCluster();
-  for (const id in players) { spawnPlayer(players[id]); players[id].score = 0; }
-  gameOver = false;
-  io.emit('init', { W, H, nest: NEST, rocks, dayLen: DAY_LEN, nightLen: NIGHT_LEN });
-  msg('新しいコロニーが誕生した！');
-}
-
-let tickCount = 0;
-function tick() {
-  if (Object.keys(players).length === 0 || gameOver) return;
-  updatePlayers();
-  updateWorkers();
-  updateEnemies();
-  updateRain();
-  updateDayCycle();
-  updateSpawns();
-
-  if (colony.nestHp <= 0) {
-    gameOver = true;
-    best = Math.max(best, colony.day);
-    io.emit('gameover', { day: colony.day, best });
-    setTimeout(resetWorld, 6000);
-  }
-
-  if (++tickCount % 2 === 0) broadcast();
-}
-
-function broadcast() {
-  io.emit('state', {
-    p: Object.values(players).map(p => ({
-      id: p.id, n: p.name, col: p.color,
-      x: Math.round(p.x), y: Math.round(p.y), a: +p.a.toFixed(2),
-      hp: Math.round(p.hp), hu: Math.round(p.hunger), c: p.carry,
-      d: p.dead ? 1 : 0, rs: Math.ceil(p.respawn), b: p.biteAnim > 0 ? 1 : 0, s: p.score,
-    })),
-    e: enemies.map(e => [e.id, e.type === 'spider' ? 0 : 1, Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
-    w: workers.map(w => [w.id, Math.round(w.x), Math.round(w.y), +w.a.toFixed(2), w.carry ? 1 : 0]),
-    f: foods.map(f => [f.id, f.t, Math.round(f.x), Math.round(f.y)]),
-    r: drops.map(d => [Math.round(d.x), Math.round(d.y), +(d.t / d.max).toFixed(2), d.r]),
-    c: {
-      food: colony.food, nh: Math.max(0, Math.round(colony.nestHp)), mnh: colony.maxNestHp,
-      day: colony.day, time: +colony.time.toFixed(1), night: colony.isNight ? 1 : 0,
-      rain: colony.rain > 0 ? 1 : 0, wk: workers.length, best,
-    },
-  });
-}
-
-// ---- 通信 ----
+// ================= 通信 =================
 io.on('connection', socket => {
-  socket.emit('init', { W, H, nest: NEST, rocks, dayLen: DAY_LEN, nightLen: NIGHT_LEN });
-  socket.emit('you', socket.id);
+  const ctx = () => {
+    const w = rooms[socket.data.code];
+    const p = w && w.players[socket.id];
+    return p && !w.gameOver ? { w, p } : null;
+  };
 
-  socket.on('join', name => {
-    if (players[socket.id]) return;
-    const p = {
-      id: socket.id,
-      name: String(name || 'アリ').replace(/[<>]/g, '').slice(0, 10) || 'アリ',
-      color: COLORS[Object.keys(players).length % COLORS.length],
-      in: { dx: 0, dy: 0 }, a: 0, biteCd: 0, biteAnim: 0, score: 0,
-    };
-    spawnPlayer(p);
-    players[socket.id] = p;
-    msg(`🐜 ${p.name} がコロニーに加わった`);
+  socket.on('join', async (d = {}) => {
+    if (socket.data.code || socket.data.joining) return;
+    socket.data.joining = true;
+    try {
+      let name = String(d.name || 'アリ').replace(/[<>&"']/g, '').trim().slice(0, 10) || 'アリ';
+      let code;
+      if (d.create) {
+        do { code = String(randi(10000, 99999)); } while (rooms[code] || await dbLoad(code).catch(() => null));
+      } else {
+        code = String(d.code || '').replace(/\D/g, '');
+        if (code.length !== 5) { socket.emit('err', '5桁の数字を入れてね'); return; }
+      }
+      const w = await getWorld(code, !!d.create);
+      if (!w) { socket.emit('err', 'その部屋は見つかりません'); return; }
+      let nm = name, k = 2;
+      while (Object.values(w.players).some(p => p.name === nm)) nm = name + k++;
+      const p = makePlayer(w, socket.id, nm);
+      w.players[socket.id] = p;
+      socket.data.code = code;
+      socket.join(code);
+      socket.emit('world', fullSync(w, p));
+      msg(w, `🐜 ${nm} が入ってきた`);
+    } finally { socket.data.joining = false; }
   });
-  socket.on('input', d => {
-    const p = players[socket.id];
-    if (!p || !d) return;
-    p.in.dx = clamp(+d.dx || 0, -1, 1);
-    p.in.dy = clamp(+d.dy || 0, -1, 1);
+
+  socket.on('p', d => {
+    const c = ctx(); if (!c || !d) return;
+    const { w, p } = c;
+    p.ax = +d.ax || 0; p.ay = +d.ay || 0; p.lmb = !!d.l;
+    if (p.dead || d.s !== p.tpSeq) return;
+    const x = +d.x, y = +d.y;
+    if (!isFinite(x) || !isFinite(y)) return;
+    const now = Date.now(), el = Math.min(0.5, (now - p.lastPos) / 1000);
+    p.lastPos = now;
+    if (Math.hypot(x - p.x, y - p.y) > PLAYER_SPEED * Math.max(el, 0.05) * 1.8 + 12) { teleport(p, p.layer, p.x, p.y); return; }
+    const tmp = { x, y };
+    collide(w, p.layer, tmp, PR - 1);
+    if (Math.hypot(tmp.x - x, tmp.y - y) > 6) { teleport(p, p.layer, tmp.x, tmp.y); return; }
+    p.x = tmp.x; p.y = tmp.y; p.a = +d.a || 0;
   });
-  socket.on('action', t => handleAction(players[socket.id], t));
+
+  socket.on('sel', i => { const c = ctx(); if (c && i >= 0 && i < 8) { c.p.sel = i | 0; } });
+
+  socket.on('use', d => {
+    const c = ctx(); if (!c || !d || c.p.dead) return;
+    const { w, p } = c;
+    if (Math.hypot(d.x - p.x, d.y - p.y) > REACH + 8) return;
+    const l = p.layer, tx = Math.floor(d.x / T), ty = Math.floor(d.y / T);
+    const idx = ty * LW(l) + tx, o = w.objs[l].get(idx);
+    if (o && o.t === 'chest') { p.openChest = { l, idx }; socket.emit('chest', { l, i: idx, items: o.items }); return; }
+    if (o && o.t === 'bench') { socket.emit('openCraft'); return; }
+    const s = p.inv[p.sel];
+    if (!s) return;
+    const def = ITEMS[s.id];
+    if (def.food) { eat(p); return; }
+    if (def.place && canPlace(w, l, tx, ty, def.place)) {
+      const no = { t: def.place, hp: OBJ[def.place].hp };
+      if (def.place === 'chest') no.items = new Array(CHEST_SIZE).fill(null);
+      removeItem(p.inv, s.id, 1);
+      setObj(w, l, idx, no);
+      if (OBJ[def.place].support) recomputeSupport(w);
+      emitInv(p);
+    }
+  });
+  function eat(p) {
+    const s = p.inv[p.sel];
+    if (!s || !ITEMS[s.id].food || p.hunger >= 99.5) return;
+    p.hunger = Math.min(100, p.hunger + ITEMS[s.id].food);
+    s.n--; if (!s.n) p.inv[p.sel] = null;
+    emitInv(p);
+  }
+  socket.on('eat', () => { const c = ctx(); if (c && !c.p.dead) eat(c.p); });
+
+  socket.on('craft', ri => {
+    const c = ctx(); if (!c || c.p.dead) return;
+    const { w, p } = c, r = RECIPES[ri];
+    if (!r) return;
+    if (r.bench && !nearBench(w, p)) { msgTo(p, '作業台の近くでないと作れない'); return; }
+    for (const id in r.cost) if (countItem(p.inv, id) < r.cost[id]) return;
+    for (const id in r.cost) removeItem(p.inv, id, r.cost[id]);
+    give(w, p, r.out, r.n);
+    emitInv(p);
+  });
+
+  socket.on('swap', d => {
+    const c = ctx(); if (!c || !d) return;
+    const { p } = c, a = d.a | 0, b = d.b | 0;
+    if (a < 0 || b < 0 || a >= INV_SIZE || b >= INV_SIZE || a === b) return;
+    const A = p.inv[a], B = p.inv[b];
+    if (A && B && A.id === B.id && B.n < maxStack(B.id)) {
+      const k = Math.min(A.n, maxStack(B.id) - B.n); B.n += k; A.n -= k; if (!A.n) p.inv[a] = null;
+    } else { p.inv[a] = B; p.inv[b] = A; }
+    emitInv(p);
+  });
+
+  socket.on('drop', i => {
+    const c = ctx(); if (!c || c.p.dead) return;
+    const { w, p } = c, s = p.inv[i | 0];
+    if (!s) return;
+    p.inv[i | 0] = null;
+    addGroundItem(w, { layer: p.layer, x: Math.round(p.x), y: Math.round(p.y), item: s.id, n: s.n, noPickId: p.id, noPickUntil: Date.now() + 2000 });
+    emitInv(p);
+  });
+
+  socket.on('chestMove', d => {
+    const c = ctx(); if (!c || !d || c.p.dead) return;
+    const { w, p } = c, oc = p.openChest;
+    if (!oc || oc.l !== p.layer) return;
+    const o = w.objs[oc.l].get(oc.idx);
+    if (!o || o.t !== 'chest') { p.openChest = null; return; }
+    const tx = oc.idx % LW(oc.l), ty = Math.floor(oc.idx / LW(oc.l));
+    if (Math.hypot((tx + 0.5) * T - p.x, (ty + 0.5) * T - p.y) > T * 4) return;
+    const from = d.from === 'chest' ? o.items : p.inv, to = d.from === 'chest' ? p.inv : o.items;
+    const s = from[d.slot | 0];
+    if (!s) return;
+    const left = addItem(to, s.id, s.n);
+    if (left) s.n = left; else from[d.slot | 0] = null;
+    emitInv(p);
+    io.to(w.code).emit('chest', { l: oc.l, i: oc.idx, items: o.items, update: 1 });
+  });
+
+  socket.on('enter', () => {
+    const c = ctx(); if (!c || c.p.dead) return;
+    const { p } = c;
+    if (p.layer === 's' && dist(p, NEST) < NEST.r + 30) teleport(p, 'u', UENT_X, UENT_Y);
+    else if (p.layer === 'u' && Math.hypot(p.x - UENT_X, p.y - UENT_Y) < T * 1.3) teleport(p, 's', NEST.x, NEST.y + NEST.r + 14);
+  });
+
   socket.on('disconnect', () => {
-    const p = players[socket.id];
-    if (p) { msg(`${p.name} が去った`); delete players[socket.id]; }
+    const w = rooms[socket.data.code];
+    if (!w || !w.players[socket.id]) return;
+    const p = w.players[socket.id];
+    w.saved[p.name] = playerSave(p);
+    delete w.players[socket.id];
+    msg(w, `${p.name} が出ていった`);
+    if (!Object.keys(w.players).length) saveWorld(w);
   });
 });
 
-genRocks();
-colony = newColony();
-for (let i = 0; i < 25; i++) spawnFoodCluster();
-setInterval(tick, 1000 / TICK);
-
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Ant Survival running on port ${PORT}`));
+initDB().then(() => server.listen(PORT, () => console.log(`Ant Survival running on port ${PORT}`)));
