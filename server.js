@@ -991,6 +991,15 @@ io.on('connection', socket => {
     else if (p.layer === 'u' && Math.hypot(p.x - UENT_X, p.y - UENT_Y) < T * 1.3) teleport(p, 's', NEST.x, NEST.y + NEST.r + 14);
   });
 
+  // テスト用（環境変数 ANT_DEBUG=1 のときだけ有効）
+  if (process.env.ANT_DEBUG) socket.on('dbg', d => {
+    const c = ctx(); if (!c) return;
+    const { w, p } = c;
+    if (d.night) { w.isNight = false; w.time = DAY_LEN - 0.1; }
+    if (d.give) { give(w, p, d.give, d.n || 1); emitInv(p); }
+    if (d.pos) { teleport(p, d.pos.l, d.pos.x, d.pos.y); }
+  });
+
   socket.on('disconnect', () => {
     const w = rooms[socket.data.code];
     if (!w || !w.players[socket.id]) return;
