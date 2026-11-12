@@ -5,6 +5,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -25,7 +26,8 @@ const PLAYER_SPEED = 150, PR = 10, REACH = 80;
 const INV_SIZE = 24, CHEST_SIZE = 16, STACK = 50;
 const SUPPORT_RANGE = 2;            // 土の壁から何マス以内なら支えられるか
 const CRACK_TIME = 5;               // ヒビが入ってから崩れるまでの秒数
-const ALL_DEAD_GAMEOVER = true;     // 全員同時に死んだらゲームオーバー（ワールドリセット）
+const ALL_DEAD_GAMEOVER = false;    // true にすると全員同時に死んだらワールドがリセットされる（今はオフ：死んでも同じワールドで復活）
+const MAX_WORLDS = 3;               // 1人が作れるワールドの数
 const SAVE_INTERVAL = 60;
 const SAVE_DIR = path.join(__dirname, 'saves');
 const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#e67e22', '#1abc9c', '#f1c40f', '#ecf0f1', '#e84393'];
@@ -395,6 +397,7 @@ async function initDB() {
     const c = new MongoClient(process.env.MONGODB_URI);
     await c.connect();
     mongoCol = c.db('antsurvival').collection('worlds');
+    accCol = c.db('antsurvival').collection('accounts');
     console.log('MongoDBに接続しました');
   } catch (e) { console.error('MongoDB接続失敗。ファイル保存に切り替えます', e.message); }
 }
@@ -425,7 +428,7 @@ function serialize(w) {
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
     objs: { s: [...w.objs.s], u: [...w.objs.u] },
-    items, saved: w.saved, lair: w.lair, quest: w.quest, queen: w.queen,
+    items, saved: w.saved, lair: w.lair, quest: w.quest, queen: w.queen, owner: w.owner, name: w.name,
   };
 }
 function deserialize(code, d) {
@@ -440,17 +443,87 @@ function deserialize(code, d) {
     w.items.set(it.id, it);
     if (it.res) w.resCount[it.res] = (w.resCount[it.res] || 0) + 1;
   }
+  w.owner = d.owner || null; w.name = d.name || 'ワールド';
   if (d.quest) { w.lair = d.lair; w.quest = d.quest; w.queen = d.queen; }
   else { w.lair = { x: 600, y: 600 }; genQuest(w); }            // 古いセーブ用
   if (w.quest.stage === 3 && !w.quest.bossDead) spawnBoss(w);
   recomputeSupport(w);
   return w;
 }
-async function saveWorld(w) {
-  if (w.saving || w.gameOver) return;
-  w.saving = true;
-  try { await dbSave(w.code, serialize(w)); } catch (e) { console.error('保存失敗', w.code, e.message); }
-  w.saving = false;
+function saveWorld(w) {
+  if (w.gameOver) return Promise.resolve();
+  // 保存は順番に1つずつ
+  w.savePromise = (w.savePromise || Promise.resolve())
+    .then(() => dbSave(w.code, serialize(w)))
+    .catch(e => console.error('保存失敗', w.code, e.message));
+  return w.savePromise;
+}
+// 誰もいなくなったワールドは保存してメモリから外す
+function unloadIfEmpty(w) {
+  if (Object.keys(w.players).length) return;
+  saveWorld(w).then(() => { if (!Object.keys(w.players).length && rooms[w.code] === w) delete rooms[w.code]; });
+}
+
+// ================= アカウント =================
+let accCol = null;
+const ACC_DIR = path.join(SAVE_DIR, 'accounts');
+const accCache = new Map();
+const online = new Map();                       // アカウントID → socket.id
+const accKey = n => String(n || '').trim().toLowerCase();
+async function accGet(name) {
+  const k = accKey(name);
+  if (!k) return null;
+  if (accCache.has(k)) return accCache.get(k);
+  let a = null;
+  if (accCol) a = await accCol.findOne({ _id: k });
+  else { const f = path.join(ACC_DIR, encodeURIComponent(k) + '.json'); if (fs.existsSync(f)) a = JSON.parse(fs.readFileSync(f, 'utf8')); }
+  if (a) accCache.set(k, a);
+  return a;
+}
+async function accPut(a) {
+  accCache.set(a._id, a);
+  if (accCol) { await accCol.replaceOne({ _id: a._id }, a, { upsert: true }); return; }
+  fs.mkdirSync(ACC_DIR, { recursive: true });
+  fs.writeFileSync(path.join(ACC_DIR, encodeURIComponent(a._id) + '.json'), JSON.stringify(a));
+}
+const hashPass = (pass, salt) => crypto.scryptSync(String(pass), salt, 32).toString('hex');
+const sha = t => crypto.createHash('sha256').update(String(t)).digest('hex');
+function sameHex(a, b) { const A = Buffer.from(a, 'hex'), B = Buffer.from(b, 'hex'); return A.length === B.length && crypto.timingSafeEqual(A, B); }
+function validName(n) {
+  n = String(n || '').trim();
+  if (n.length < 2 || n.length > 12 || /[\s<>&"'\/\\]/.test(n)) return null;
+  return n;
+}
+function issueToken(a) {
+  const t = crypto.randomBytes(24).toString('hex');
+  a.tokens = [sha(t), ...(a.tokens || [])].slice(0, 5);   // 端末5台まで自動ログイン
+  return t;
+}
+function socketOf(accId) { const id = online.get(accId); return id ? io.sockets.sockets.get(id) : null; }
+async function lobbyData(a) {
+  const wInfo = c => ({ code: c.code, name: c.name, players: rooms[c.code] ? Object.keys(rooms[c.code].players).length : 0 });
+  const friends = [];
+  for (const fk of a.friends) {
+    const f = await accGet(fk);
+    if (!f) continue;
+    const mutual = f.friends.includes(a._id), fs2 = socketOf(fk);
+    const inCode = fs2 && fs2.data.code, inW = inCode && f.worlds.concat(a.worlds).find(x => x.code === inCode);
+    friends.push({ name: f.name, mutual, online: !!fs2, inWorld: mutual && fs2 ? (inW ? inW.name : inCode ? '友達のワールド' : null) : null, worlds: mutual ? f.worlds.map(wInfo) : [] });
+  }
+  const incoming = [];
+  for (const k of a.followers || []) if (!a.friends.includes(k)) { const f = await accGet(k); if (f) incoming.push(f.name); }
+  return { name: a.name, max: MAX_WORLDS, worlds: a.worlds.map(wInfo), friends, incoming };
+}
+async function sendLobby(socket) {
+  const a = await accGet(socket.data.user);
+  if (a) socket.emit('lobby', await lobbyData(a));
+}
+function refreshLobbyOf(accId) { const s2 = socketOf(accId); if (s2 && !s2.data.code) sendLobby(s2); }
+// ワールドに入れるか（自分のワールド or お互いフレンドの人のワールド）
+async function canJoin(a, w) {
+  if (!w.owner || w.owner === a._id) return true;
+  const o = await accGet(w.owner);
+  return !!(o && o.friends.includes(a._id) && a.friends.includes(o._id));
 }
 
 // ================= 部屋 =================
@@ -1177,7 +1250,7 @@ function fullSync(w, p) {
     objs: { s: [...w.objs.s].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]), u: [...w.objs.u].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]) },
     items: [...w.items.values()].map(compactItem),
     you: { l: p.layer, x: p.x, y: p.y, s: p.tpSeq },
-    lair: w.lair, quest: { stage: w.quest.stage, clearDay: w.quest.clearDay },
+    lair: w.lair, quest: { stage: w.quest.stage, clearDay: w.quest.clearDay }, worldName: w.name,
     inv: p.inv, sel: p.sel, equip: p.equip,
   };
 }
@@ -1190,29 +1263,137 @@ io.on('connection', socket => {
     return p && !w.gameOver ? { w, p } : null;
   };
 
+  // ---------- アカウント ----------
+  socket.data.fails = 0;
+  const loginOK = async (a, token) => {
+    if (socket.data.user && socket.data.user !== a._id) {        // 同じ接続で別アカウントに切り替え
+      leaveWorld(socket);
+      if (online.get(socket.data.user) === socket.id) online.delete(socket.data.user);
+    }
+    const prev = socketOf(a._id);
+    if (prev && prev.id !== socket.id) { prev.emit('kicked', '別の端末でログインしたので切断しました'); leaveWorld(prev); prev.disconnect(true); }
+    online.set(a._id, socket.id);
+    socket.data.user = a._id;
+    socket.emit('loggedIn', { name: a.name, token });
+    sendLobby(socket);
+    for (const fk of a.followers || []) refreshLobbyOf(fk);
+  };
+  const authErr = t => socket.emit('authErr', t);
+  socket.on('register', async (d = {}) => {
+    const name = validName(d.name);
+    if (!name) return authErr('ユーザーネームは2〜12文字（空白・記号なし）');
+    const pass = String(d.pass || '');
+    if (pass.length < 4 || pass.length > 64) return authErr('パスワードは4文字以上にしてね');
+    if (await accGet(name)) return authErr('その名前はもう使われています');
+    const salt = crypto.randomBytes(16).toString('hex');
+    const a = { _id: accKey(name), name, salt, hash: hashPass(pass, salt), friends: [], followers: [], worlds: [], tokens: [], created: Date.now() };
+    const token = issueToken(a);
+    await accPut(a);
+    loginOK(a, token);
+  });
+  socket.on('login', async (d = {}) => {         // アカウント復元
+    const a = await accGet(d.name);
+    if (!a || !sameHex(hashPass(d.pass || '', a.salt), a.hash)) {
+      socket.data.fails++;
+      await new Promise(r => setTimeout(r, Math.min(5000, socket.data.fails * 400)));
+      return authErr('ユーザーネームかパスワードが違います');
+    }
+    socket.data.fails = 0;
+    const token = issueToken(a);
+    await accPut(a);
+    loginOK(a, token);
+  });
+  socket.on('auth', async (d = {}) => {          // 保存済みトークンで自動ログイン
+    const a = await accGet(d.name);
+    if (a && d.token && (a.tokens || []).includes(sha(d.token))) loginOK(a, null);
+    else socket.emit('authFail');
+  });
+  socket.on('logout', async (d = {}) => {
+    const a = await accGet(socket.data.user);
+    if (a && d.token) { a.tokens = (a.tokens || []).filter(t => t !== sha(d.token)); await accPut(a); }
+    leaveWorld(socket);
+    if (online.get(socket.data.user) === socket.id) online.delete(socket.data.user);
+    socket.data.user = null;
+  });
+  socket.on('lobby', () => { if (socket.data.user) sendLobby(socket); });
+
+  // ---------- ワールド ----------
+  socket.on('createWorld', async (d = {}) => {
+    const a = await accGet(socket.data.user); if (!a) return;
+    if (a.worlds.length >= MAX_WORLDS) return socket.emit('err', `ワールドは${MAX_WORLDS}つまでしか作れません`);
+    const name = String(d.name || '').replace(/[<>&"']/g, '').trim().slice(0, 16) || `${a.name}のワールド${a.worlds.length + 1}`;
+    let code;
+    do { code = crypto.randomBytes(5).toString('hex'); } while (rooms[code] || await dbLoad(code).catch(() => null));
+    const w = createWorld(code);
+    w.owner = a._id; w.name = name;
+    await dbSave(code, serialize(w));
+    a.worlds.push({ code, name });
+    await accPut(a);
+    sendLobby(socket);
+    for (const fk of a.followers || []) refreshLobbyOf(fk);
+  });
+  socket.on('deleteWorld', async (d = {}) => {
+    const a = await accGet(socket.data.user); if (!a) return;
+    const entry = a.worlds.find(x => x.code === d.code);
+    if (!entry) return;
+    const w = rooms[d.code];
+    if (w) {
+      w.gameOver = true;                       // これ以降は保存しない
+      for (const id of Object.keys(w.players)) { const s2 = io.sockets.sockets.get(id); if (s2) { s2.emit('kicked', 'ワールドが削除されました'); leaveWorld(s2, true); } }
+      delete rooms[d.code];
+      await w.savePromise;
+    }
+    await dbDelete(d.code).catch(() => {});
+    a.worlds = a.worlds.filter(x => x.code !== d.code);
+    await accPut(a);
+    sendLobby(socket);
+  });
   socket.on('join', async (d = {}) => {
-    if (socket.data.code || socket.data.joining) return;
+    if (socket.data.joining) return;
+    const a = await accGet(socket.data.user);
+    if (!a) return socket.emit('err', 'ログインしてね');
     socket.data.joining = true;
     try {
-      let name = String(d.name || 'アリ').replace(/[<>&"']/g, '').trim().slice(0, 10) || 'アリ';
-      let code;
-      if (d.create) {
-        do { code = String(randi(10000, 99999)); } while (rooms[code] || await dbLoad(code).catch(() => null));
-      } else {
-        code = String(d.code || '').replace(/\D/g, '');
-        if (code.length !== 5) { socket.emit('err', '5桁の数字を入れてね'); return; }
-      }
-      const w = await getWorld(code, !!d.create);
-      if (!w) { socket.emit('err', 'その部屋は見つかりません'); return; }
-      let nm = name, k = 2;
-      while (Object.values(w.players).some(p => p.name === nm)) nm = name + k++;
-      const p = makePlayer(w, socket.id, nm);
+      const code = String(d.code || '');
+      const w = await getWorld(code, false);
+      if (!w) return socket.emit('err', 'そのワールドは見つかりません');
+      if (!(await canJoin(a, w))) return socket.emit('err', 'お互いにフレンド登録すると参加できます');
+      leaveWorld(socket);
+      const p = makePlayer(w, socket.id, a.name);
       w.players[socket.id] = p;
       socket.data.code = code;
       socket.join(code);
       socket.emit('world', fullSync(w, p));
-      msg(w, `🐜 ${nm} が入ってきた`);
+      msg(w, `🐜 ${a.name} が入ってきた`);
+      for (const fk of a.followers || []) refreshLobbyOf(fk);
     } finally { socket.data.joining = false; }
+  });
+  socket.on('leave', () => { leaveWorld(socket); sendLobby(socket); });
+
+  // ---------- フレンド ----------
+  socket.on('addFriend', async (d = {}) => {
+    const a = await accGet(socket.data.user); if (!a) return;
+    const f = await accGet(d.name);
+    if (!f) return socket.emit('err', 'そのユーザーは見つかりません');
+    if (f._id === a._id) return socket.emit('err', '自分は追加できません');
+    if (a.friends.includes(f._id)) return socket.emit('err', 'もう追加しています');
+    if (a.friends.length >= 50) return socket.emit('err', 'フレンドは50人まで');
+    a.friends.push(f._id);
+    f.followers = [...new Set([...(f.followers || []), a._id])];
+    await accPut(a); await accPut(f);
+    socket.emit('info', f.friends.includes(a._id) ? `${f.name}とフレンドになりました！` : `${f.name}を追加しました（相手も追加するとワールドに参加できます）`);
+    sendLobby(socket);
+    refreshLobbyOf(f._id);
+  });
+  socket.on('removeFriend', async (d = {}) => {
+    const a = await accGet(socket.data.user); if (!a) return;
+    const f = await accGet(d.name);
+    if (!f) return;
+    a.friends = a.friends.filter(x => x !== f._id);
+    f.followers = (f.followers || []).filter(x => x !== a._id);
+    await accPut(a); await accPut(f);
+    sendLobby(socket);
+    refreshLobbyOf(f._id);
   });
 
   socket.on('p', d => {
@@ -1370,16 +1551,29 @@ io.on('connection', socket => {
     if (d.queen && w.queen) { w.queen.x = d.queen.x; w.queen.y = d.queen.y; }
   });
 
-  socket.on('disconnect', () => {
-    const w = rooms[socket.data.code];
-    if (!w || !w.players[socket.id]) return;
-    const p = w.players[socket.id];
-    w.saved[p.name] = playerSave(p);
-    delete w.players[socket.id];
-    msg(w, `${p.name} が出ていった`);
-    if (!Object.keys(w.players).length) saveWorld(w);
+  socket.on('disconnect', async () => {
+    leaveWorld(socket);
+    const u = socket.data.user;
+    if (u && online.get(u) === socket.id) {
+      online.delete(u);
+      const acc = await accGet(u);
+      if (acc) for (const fk of acc.followers || []) refreshLobbyOf(fk);
+    }
   });
 });
+
+// ワールドから抜ける（保存して、誰もいなければメモリから外す）
+function leaveWorld(socket, silent) {
+  const w = rooms[socket.data.code];
+  socket.leave(socket.data.code || '');
+  socket.data.code = null;
+  if (!w || !w.players[socket.id]) return;
+  const p = w.players[socket.id];
+  w.saved[p.name] = playerSave(p);
+  delete w.players[socket.id];
+  if (!silent) msg(w, `${p.name} が出ていった`);
+  unloadIfEmpty(w);
+}
 
 const PORT = process.env.PORT || 3000;
 initDB().then(() => server.listen(PORT, () => console.log(`Ant Survival running on port ${PORT}`)));
