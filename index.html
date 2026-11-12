@@ -64,6 +64,16 @@
   .rc button { padding: 6px 14px; border: none; border-radius: 4px; background: #d79b3b; color: #1d140b; font-weight: bold; cursor: pointer; font-family: inherit; }
   .rc button:disabled { background: #4b3a24; color: #7d6a4c; cursor: default; }
   .phint { margin-top: 10px; font-size: 12px; color: #8f7d60; }
+  .invwrap { display: flex; gap: 18px; align-items: flex-start; }
+  .eqbox { width: 150px; background: #22180e; border-radius: 6px; padding: 10px; text-align: center; }
+  .eqbox .eqrow { display: flex; align-items: center; gap: 8px; margin: 8px 0; text-align: left; font-size: 12px; color: #c8b796; }
+  .eqbox .slot.eq { border-color: #8a6a3a; background: #33261a; }
+  .eqbox .stats { font-size: 12px; line-height: 1.8; color: #e8d8b8; text-align: left; margin-top: 8px; border-top: 1px solid #4b3a24; padding-top: 6px; }
+  #panel .btns button { margin: 10px 8px 0 0; padding: 8px 16px; border: none; border-radius: 5px; font-weight: bold; font-family: inherit; cursor: pointer; }
+  #story { position: fixed; inset: 0; z-index: 15; display: flex; align-items: center; justify-content: center; background: rgba(5,3,1,.88); }
+  #story .box { width: min(560px, 90vw); text-align: center; color: #f0e2c4; line-height: 2; font-size: 17px; }
+  #story h2 { font-size: 30px; color: #f2c46a; margin-bottom: 18px; letter-spacing: 4px; }
+  #story button { margin-top: 26px; font-size: 18px; padding: 12px 40px; border: none; border-radius: 6px; background: #d79b3b; color: #1d140b; font-weight: bold; cursor: pointer; font-family: inherit; }
 </style>
 </head>
 <body>
@@ -80,12 +90,19 @@
     </div>
     <div id="err"></div>
     <div class="keys">
-      WASD 移動 ／ 左クリック長押し 掘る・攻撃・壊す ／ 右クリック 置く・使う・開く<br>
-      1〜8・ホイール 持ち替え ／ Tab 持ち物 ／ C クラフト ／ E 食べる ／ F 巣に出入り ／ Q 捨てる
+      WASD 移動 ／ 左クリック長押し・K 掘る・攻撃・壊す ／ 右クリック・O 置く ／ E 目の前を調べる・使う<br>
+      1〜8・ホイール 持ち替え ／ Tab 持ち物・装備 ／ C クラフト ／ F 巣に出入り ／ Q 捨てる
     </div>
   </div>
 </div>
 <canvas id="c"></canvas>
+<div id="story" class="hidden"><div class="box">
+  <h2>👑 消えた女王</h2>
+  嵐の夜、巨大なクモが巣を襲い、<br>女王アリを連れ去った。<br><br>
+  巣の奥には、まだ女王の匂いが残っている。<br>
+  匂いをたどり、女王を取り戻せ。
+  <br><button id="storyBtn">匂いをたどる</button>
+</div></div>
 <div id="panel" class="hidden"><h2 id="ptitle"></h2><div id="pbody"></div><div class="phint" id="phint"></div></div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -109,6 +126,7 @@ let grass = new Map(), st = null, cracks = new Map();
 const RP = {}, RE = {};
 const msgs = [], parts = [];
 let gameover = null, panel = null, chest = null, held = -1, shake = 0;
+let equip = { jaw: null, armor: null }, lair = null, clearInfo = null, webs = [], questFlash = 0;
 const mouse = { x: 0, y: 0, l: false };
 const keys = {};
 const mm = document.createElement('canvas'); let mmDirty = true;
@@ -136,7 +154,8 @@ socket.on('world', d => {
   objs.u = new Map(d.objs.u.map(([i, t, hp, a]) => [i, { t, hp, a }]));
   items.clear(); for (const it of d.items) addItemC(it);
   Object.assign(me, { l: d.you.l, x: d.you.x, y: d.you.y, s: d.you.s });
-  inv = d.inv; sel = d.sel; mmDirty = true; gameover = null; closePanel();
+  inv = d.inv; sel = d.sel; equip = d.equip || { jaw: null, armor: null }; lair = d.lair; mmDirty = true; gameover = null; closePanel();
+  try { if (d.quest.stage === 0 && !localStorage.getItem('story_' + d.code)) $('story').classList.remove('hidden'); } catch (e) {}
   $('lobby').classList.add('hidden');
   for (const k in RP) delete RP[k];
   for (const k in RE) delete RE[k];
@@ -145,7 +164,11 @@ function addItemC(a) { items.set(a[0], { id: a[0], l: a[1] ? 'u' : 's', x: a[2],
 socket.on('item+', addItemC);
 socket.on('item-', id => items.delete(id));
 socket.on('tp', d => { Object.assign(me, { s: d.s, l: d.l, x: d.x, y: d.y }); if (panel === 'chest') closePanel(); });
-socket.on('inv', d => { inv = d.inv; sel = d.sel; if (panel) renderPanel(); });
+socket.on('inv', d => { inv = d.inv; sel = d.sel; equip = d.equip || equip; if (panel) renderPanel(); });
+socket.on('web', ([x1, y1, x2, y2]) => webs.push({ x1, y1, x2, y2, life: 0.7 }));
+socket.on('questUp', () => questFlash = 2.5);
+socket.on('clear', d => clearInfo = { day: d.day, t: 10 });
+$('storyBtn').onclick = () => { $('story').classList.add('hidden'); try { localStorage.setItem('story_' + CODE, 1); } catch (e) {} };
 socket.on('tiles', list => { for (const [i, v] of list) under[i] = v; mmDirty = true; });
 socket.on('grass', list => { for (const [i, g] of list) grass.set(i, g); });
 socket.on('objs', list => { for (const { l, i, o } of list) { if (o) objs[l].set(i, o); else objs[l].delete(i); } mmDirty = true; });
@@ -189,7 +212,8 @@ addEventListener('keydown', e => {
   if (e.code === 'Tab') { e.preventDefault(); panel === 'inv' ? closePanel() : openPanel('inv'); }
   if (e.code === 'KeyC') panel === 'craft' ? closePanel() : openPanel('craft');
   if (e.code === 'Escape') closePanel();
-  if (e.code === 'KeyE') socket.emit('eat');
+  if (e.code === 'KeyE' && !e.repeat) interactFront();
+  if (e.code === 'KeyO' && !e.repeat) placeFront();
   if (e.code === 'KeyF') socket.emit('enter');
   if (e.code === 'KeyQ') socket.emit('drop', sel);
   if (/^Digit[1-8]$/.test(e.code)) setSel(+e.code.slice(5) - 1);
@@ -209,6 +233,45 @@ addEventListener('mouseup', e => { if (e.button === 0) mouse.l = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('wheel', e => { if (inGame()) setSel((sel + (e.deltaY > 0 ? 1 : 7)) % 8); }, { passive: true });
 function setSel(i) { sel = i; socket.emit('sel', i); }
+
+// ---- 目の前を操作（E / K / O） ----
+const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return Math.abs(d); };
+const frontPoint = d => ({ x: me.x + Math.cos(me.a) * d, y: me.y + Math.sin(me.a) * d });
+function kAim() {                 // 目の前に敵がいれば敵、いなければ目の前のマス
+  let best = null, bd = 1e9;
+  for (const id in RE) {
+    const e = RE[id];
+    if ((e.d[2] ? 'u' : 's') !== me.l) continue;
+    const d = Math.hypot(e.x - me.x, e.y - me.y);
+    if (d > D.REACH + 20 || angDiff(Math.atan2(e.y - me.y, e.x - me.x), me.a) > 1.2) continue;
+    if (d < bd) { bd = d; best = e; }
+  }
+  if (best) return { x: best.x, y: best.y, enemy: true };
+  return frontPoint(28);
+}
+const INTERACT = { chest: 1, bench: 1, bed: 1, clue: 1, clue3: 1, cocoon: 1, queenCocoon: 1 };
+function interactFront() {
+  if (!inGame()) return;
+  const W = LW(me.l), T = D.T, ctx0 = Math.floor(me.x / T), cty0 = Math.floor(me.y / T);
+  let best = null, bs = 1e9;
+  for (let ty = cty0 - 3; ty <= cty0 + 3; ty++) for (let tx = ctx0 - 3; tx <= ctx0 + 3; tx++) {
+    const o = objs[me.l].get(ty * W + tx);
+    if (!o || !INTERACT[o.t]) continue;
+    const x = (tx + .5) * T, y = (ty + .5) * T, d = Math.hypot(x - me.x, y - me.y);
+    if (d > D.REACH) continue;
+    const sc = d + angDiff(Math.atan2(y - me.y, x - me.x), me.a) * 40;
+    if (sc < bs) { bs = sc; best = { x, y }; }
+  }
+  if (best) socket.emit('use', best);
+  else if (canEnter()) socket.emit('enter');
+  else socket.emit('eat');
+}
+function placeFront() {
+  const s = inv[sel];
+  if (!s || !D.ITEMS[s.id].place) return;
+  const p = frontPoint(38);
+  socket.emit('use', { x: (Math.floor(p.x / D.T) + .5) * D.T, y: (Math.floor(p.y / D.T) + .5) * D.T });
+}
 
 // ---- タッチ操作（iPad） ----
 function hotbarLayout() { const sz = touchMode ? 50 : 54, gap = touchMode ? 5 : 6, w = 8 * sz + 7 * gap; return { sz, gap, x: VW / 2 - w / 2, y: VH - sz - 16 }; }
@@ -375,7 +438,7 @@ function drawAnt(x, y, a, col, s, phase, carry, bite) {
   if (carry) drawIcon(ctx, carry, 22, 0, 14);
   ctx.restore();
 }
-function drawSpider(x, y, a, phase, hit, s) {
+function drawSpider(x, y, a, phase, hit, s, boss) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
   ell(ctx, -4, 5, 34, 26, 0, 'rgba(0,0,0,0.3)');
   ctx.strokeStyle = hit ? '#fff' : '#20140c'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
@@ -385,7 +448,8 @@ function drawSpider(x, y, a, phase, hit, s) {
     const fa = ang + side * (i < 2 ? -0.35 : 0.35);
     ctx.beginPath(); ctx.moveTo(-2, 0); ctx.lineTo(kx, ky); ctx.lineTo(kx + Math.cos(fa) * 18, ky + Math.sin(fa) * 18); ctx.stroke();
   }
-  ell(ctx, -12, 0, 15, 12, 0, hit ? '#fff' : '#2a1c12'); ell(ctx, 5, 0, 9, 8, 0, hit ? '#fff' : '#3b281a');
+  ell(ctx, -12, 0, 15, 12, 0, hit ? '#fff' : boss ? '#24122e' : '#2a1c12'); ell(ctx, 5, 0, 9, 8, 0, hit ? '#fff' : boss ? '#3a1d44' : '#3b281a');
+  if (boss) { for (let k = 0; k < 4; k++) ln(ctx, [[-24 + k * 5, -9], [-22 + k * 5, 9]], 'rgba(200,120,255,.35)', 1.5); }
   ctx.fillStyle = '#b8261a'; ctx.beginPath(); ctx.moveTo(-18, 0); ctx.lineTo(-12, -4); ctx.lineTo(-6, 0); ctx.lineTo(-12, 4); ctx.fill();
   for (const [ex, ey] of [[11, -3], [11, 3], [9, -5], [9, 5]]) circ(ctx, ex, ey, 1.4, '#ff5a3a');
   ctx.restore();
@@ -435,7 +499,8 @@ requestAnimationFrame(loop);
 
 function update(dt) {
   const ms = myState(), dead = ms && ms[9];
-  const a = aim();
+  const kHeld = !!keys.KeyK && !panel;
+  const a = kHeld ? kAim() : aim();
   if (wt && !wt.hold && performance.now() - wt.t0 > 230) { wt.hold = true; mouse.l = true; }   // 長押し＝掘る・攻撃
   let dx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
   let dy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
@@ -451,15 +516,16 @@ function update(dt) {
   } else if (!dead) {
     if (dx || dy) {
       const len = Math.hypot(dx, dy), ox = me.x, oy = me.y;
+      if (ms && ms[17]) spd *= 0.45;   // クモの糸で足止め
       me.x += dx / len * D.PLAYER_SPEED * spd * dt; me.y += dy / len * D.PLAYER_SPEED * spd * dt;
       collide(me.l, me, D.PR);
       me.phase += Math.hypot(me.x - ox, me.y - oy) * 0.35;
-      if (!mouse.l) me.a = Math.atan2(dy, dx);
+      if (!mouse.l && !(kHeld && a.enemy)) me.a = Math.atan2(dy, dx);
     }
-    if (mouse.l) me.a = Math.atan2(a.y - me.y, a.x - me.x);
+    if (mouse.l || (kHeld && a.enemy)) me.a = Math.atan2(a.y - me.y, a.x - me.x);
   }
   sendT -= dt;
-  if (sendT <= 0) { sendT = 0.05; socket.emit('p', { x: me.x, y: me.y, a: me.a, ax: a.x, ay: a.y, l: mouse.l && !sleeping, s: me.s }); }
+  if (sendT <= 0) { sendT = 0.05; socket.emit('p', { x: me.x, y: me.y, a: me.a, ax: a.x, ay: a.y, l: (mouse.l || kHeld) && !sleeping, s: me.s }); }
   if (shake > 0) shake -= dt;
 }
 
@@ -503,8 +569,9 @@ function render(dt) {
   for (const id in RE) {
     const e = RE[id], d = e.d;
     if ((d[2] ? 'u' : 's') !== L || !vis(e.x, e.y, 40)) continue;
-    if (d[1] === 0) drawSpider(e.x, e.y, e.a, e.phase * .5, d[7], 0.42); else drawBeetle(e.x, e.y, e.a, e.phase * .6, d[7], 0.5);
-    if (d[6] < 100) bar(e.x - 14, e.y - 22, 28, 3, d[6] / 100, '#e74c3c');
+    if (d[1] === 2) drawSpider(e.x, e.y, e.a, e.phase * .3, d[7], 1.15, true);
+    else if (d[1] === 0) drawSpider(e.x, e.y, e.a, e.phase * .5, d[7], 0.42); else drawBeetle(e.x, e.y, e.a, e.phase * .6, d[7], 0.5);
+    if (d[6] < 100 && d[1] !== 2) bar(e.x - 14, e.y - 22, 28, 3, d[6] / 100, '#e74c3c');
   }
   // 他プレイヤー
   for (const id in RP) {
@@ -521,6 +588,30 @@ function render(dt) {
     const s = inv[sel];
     drawAnt(me.x, me.y, me.a, ms[2], 0.7, me.phase, ms[16] ? null : s ? s.id : null, ms[11]);
     if (ms[16]) zzz(me.x, me.y);
+  }
+  // 女王
+  if (st && st.qn) {
+    const [qx, qy, ql, qs, qhp, qf, qa] = st.qn;
+    if (qs > 0 && (ql ? 'u' : 's') === L) {
+      drawAnt(qx, qy, qa, '#e2b45c', 1.0, TT * 8, null, 0);
+      for (let k = -1; k <= 1; k++) circ(ctx, qx - 4 + Math.cos(qa) * 10, qy + k * 3 + Math.sin(qa) * 10 - 0, 1.6, '#ffd75a');
+      nameTag(qf ? '👑 女王（気絶中）' : '👑 女王', qx, qy - 22, '#ffe08a');
+      if (qs === 1) bar(qx - 16, qy - 19, 32, 3, qhp / 100, '#ffd75a');
+    }
+  }
+  // 女王の匂い（目標地点に漂う）
+  if (st && st.q && st.q[1] >= 0 && (st.q[1] ? 'u' : 's') === L && Math.random() < .5) {
+    parts.push({ l: L, x: st.q[2] + (Math.random() - .5) * 90, y: st.q[3] + (Math.random() - .5) * 90, vx: 0, vy: -12, life: 1.4, col: '255,150,210', r: 1.6 });
+  }
+  for (let i = webs.length - 1; i >= 0; i--) {
+    const wb = webs[i]; wb.life -= dt;
+    if (wb.life <= 0) { webs.splice(i, 1); continue; }
+    if (L === 's') ln(ctx, [[wb.x1, wb.y1], [wb.x2, wb.y2]], `rgba(240,240,250,${wb.life})`, 2);
+  }
+  if (!touchMode && !mouse.l && !wt) {                // 目の前のマス（E/K/Oの対象）
+    const fp = frontPoint(30), T2 = D.T;
+    ctx.strokeStyle = 'rgba(255,230,160,.22)'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.strokeRect(Math.floor(fp.x / T2) * T2 + .5, Math.floor(fp.y / T2) * T2 + .5, T2 - 1, T2 - 1); ctx.setLineDash([]);
   }
   if (!touchMode || wt) drawCursor();
   // パーティクル
@@ -596,6 +687,12 @@ function drawSurface(tx0, ty0, tx1, ty1, vis) {
     if (gs === 3) circ(ctx, bx + 16 + Math.sin(TT + tx) * 2, by + 26 - 26, 2.2, '#d9c46a');
   }
   drawTrees(vis);
+  if (lair && vis(lair.x, lair.y, 400)) {             // 巨大グモの巣
+    ctx.strokeStyle = 'rgba(235,235,245,.28)'; ctx.lineWidth = 1.5;
+    for (let k = 0; k < 16; k++) { const a = k / 16 * Math.PI * 2; ctx.beginPath(); ctx.moveTo(lair.x, lair.y); ctx.lineTo(lair.x + Math.cos(a) * 360, lair.y + Math.sin(a) * 360); ctx.stroke(); }
+    for (let r = 40; r <= 360; r += 40) { ctx.beginPath(); for (let k = 0; k <= 16; k++) { const a = k / 16 * Math.PI * 2, rr = r - (k % 2) * 6; k ? ctx.lineTo(lair.x + Math.cos(a) * rr, lair.y + Math.sin(a) * rr) : ctx.moveTo(lair.x + Math.cos(a) * rr, lair.y + Math.sin(a) * rr); } ctx.stroke(); }
+    for (let k = 0; k < 7; k++) { const a = hash(k, 5) * 7, d = 120 + hash(5, k) * 200; ell(ctx, lair.x + Math.cos(a) * d, lair.y + Math.sin(a) * d, 9, 6, a, 'rgba(220,215,200,.7)'); }
+  }
   // ゴミ・キノコ
   for (const d of deco) {
     if (d.t === 'flower' || !vis(d.x, d.y, d.r + 20)) continue;
@@ -706,7 +803,26 @@ function drawCrackLines(x, y, p, col) {
 }
 function drawObj(o, tx, ty) {
   const T = D.T, x = tx * T + 16, y = ty * T + 16;
-  if (o.t === 'branch') {
+  if (o.t === 'clue') {
+    const g = ctx.createRadialGradient(x, y, 1, x, y, 22); g.addColorStop(0, 'rgba(255,170,220,.6)'); g.addColorStop(1, 'rgba(255,170,220,0)');
+    ctx.fillStyle = g; ctx.fillRect(x - 22, y - 22, 44, 44);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(.5 + Math.sin(TT) * .1);
+    ell(ctx, 0, 0, 14, 5, 0, 'rgba(235,240,255,.85)'); ln(ctx, [[-14, 0], [14, 0]], 'rgba(150,160,190,.8)', 1);
+    for (let k = -2; k <= 2; k++) ln(ctx, [[k * 5, 0], [k * 5 + 3, -4]], 'rgba(150,160,190,.5)', .8);
+    ctx.restore();
+  } else if (o.t === 'clue3') {
+    if (!(st && st.c[2])) return;                         // 夜しか見えない
+    for (let k = 0; k < 3; k++) { const t = (TT * .5 + k / 3) % 1; ctx.strokeStyle = `rgba(255,150,210,${.7 * (1 - t)})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 6 + t * 26, 0, 7); ctx.stroke(); }
+    circ(ctx, x, y, 5, '#ff9ad2');
+  } else if (o.t === 'cocoon' || o.t === 'queenCocoon') {
+    const big = o.t === 'queenCocoon', rx = big ? 26 : 15, ry = big ? 17 : 11;
+    ell(ctx, x + 3, y + 6, rx, ry, 0, 'rgba(0,0,0,.3)');
+    ell(ctx, x, y, rx, ry, .3, '#e8e4d8');
+    if (big) { ctx.globalAlpha = .35; drawAnt(x, y, .3, '#e2b45c', .9, 0, null, 0); ctx.globalAlpha = 1; }
+    ctx.strokeStyle = 'rgba(180,175,160,.9)'; ctx.lineWidth = 1;
+    for (let k = 0; k < 7; k++) { ctx.beginPath(); ctx.ellipse(x, y, rx * (.4 + k * .09), ry, .3 + k * .45, 0, 7); ctx.stroke(); }
+    if (big) for (let k = 0; k < 2; k++) { const t = (TT * .4 + k / 2) % 1; ctx.strokeStyle = `rgba(255,200,120,${.5 * (1 - t)})`; ctx.beginPath(); ctx.arc(x, y, 30 + t * 30, 0, 7); ctx.stroke(); }
+  } else if (o.t === 'branch') {
     ctx.save(); ctx.translate(x, y); ctx.rotate(o.a || 0);
     ln(ctx, [[-50, 6], [52, 4]], 'rgba(0,0,0,.3)', 12);
     ln(ctx, [[-50, 0], [-10, -2], [50, 0]], '#6b4524', 11); ln(ctx, [[-50, -2], [-10, -4], [50, -2]], '#8a5c32', 4);
@@ -842,6 +958,57 @@ function drawHUD(dt, ms) {
     ctx.fillStyle = '#ddd'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
     ctx.fillText(`大あご Lv${ms[14]}　防御 ${Math.round(ms[15] * 100)}%`, 20, 82);
   }
+  // クエスト（目標と女王の匂いの方向）
+  if (st && st.q) {
+    const [qs, ql, qx, qy, bossDead] = st.q;
+    const goal = [
+      '巣の地下のどこかに「女王の羽」が落ちている。匂いをたどって掘り進め',
+      '遠くの巨木の根元にある「糸の繭」を調べろ（小石の大あごが必要）',
+      '空き缶のそばに女王の匂いが残っている。夜に調べろ',
+      bossDead ? '巣の中心の繭を破って女王を助け出せ！' : '巨大グモの巣へ向かい、巨大グモを倒せ！',
+      '女王を巣の入口まで護衛しろ（女王はついてくる）',
+      '👑 クリア！ 女王は巣で暮らしている（近くにいると回復）',
+    ][qs];
+    const where = ql < 0 || qs >= 5 ? '' : (ql ? 'u' : 's') !== me.l ? (ql ? '　→ 匂いは地下から' : '　→ 匂いは地上から') : '';
+    ctx.font = 'bold 13px sans-serif';
+    const title = qs >= 5 ? '🏆 女王救出' : `👑 女王を探せ　${Math.min(qs, 3)}/3`;
+    const w2 = Math.max(240, ctx.measureText(goal).width + 20);
+    ctx.fillStyle = questFlash > 0 ? `rgba(120,70,20,${.5 + Math.sin(TT * 10) * .2})` : 'rgba(0,0,0,.45)'; ctx.fillRect(10, 98, w2, 48);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#f2c46a'; ctx.fillText(title + where, 18, 116);
+    ctx.font = '12px sans-serif'; ctx.fillStyle = '#eee'; ctx.fillText(goal, 18, 136);
+    questFlash = Math.max(0, questFlash - dt);
+    // 匂いの方向
+    if (ql >= 0 && qs < 5 && (ql ? 'u' : 's') === me.l && ms && !ms[9]) {
+      const dx = qx - me.x, dy = qy - me.y, dm = Math.round(Math.hypot(dx, dy) / D.T);
+      if (Math.abs(dx) * Z > VW / 2 - 40 || Math.abs(dy) * Z > VH / 2 - 40) {
+        const a = Math.atan2(dy, dx), R = Math.min(VW, VH) * .36, ax = VW / 2 + Math.cos(a) * R, ay = VH / 2 + Math.sin(a) * R;
+        ctx.save(); ctx.translate(ax, ay); ctx.rotate(a); ctx.fillStyle = 'rgba(255,140,200,.9)';
+        ctx.beginPath(); ctx.moveTo(15, 0); ctx.lineTo(-8, -9); ctx.lineTo(-3, 0); ctx.lineTo(-8, 9); ctx.fill(); ctx.restore();
+        ctx.fillStyle = 'rgba(255,170,215,.95)'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`女王の匂い ${dm}m`, ax, ay - 15);
+      }
+    }
+    // 巨大グモの体力
+    for (const id in RE) {
+      const e = RE[id];
+      if (e.d[1] !== 2 || (e.d[2] ? 'u' : 's') !== me.l || Math.hypot(e.x - me.x, e.y - me.y) > 700) continue;
+      ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(VW / 2 - 202, 68, 404, 22);
+      ctx.fillStyle = '#5a2a6a'; ctx.fillRect(VW / 2 - 200, 70, 400, 18);
+      ctx.fillStyle = '#c04ad8'; ctx.fillRect(VW / 2 - 200, 70, 400 * e.d[6] / 100, 18);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('🕷 巨大グモ', VW / 2, 84);
+    }
+  }
+  if (ms && ms[17]) { ctx.fillStyle = 'rgba(230,230,240,.12)'; ctx.fillRect(0, 0, VW, VH); ctx.fillStyle = '#eef'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('クモの糸で動きが鈍い！', VW / 2, VH / 2 + 60); }
+  if (clearInfo) {
+    clearInfo.t -= dt;
+    if (clearInfo.t <= 0) clearInfo = null;
+    else {
+      const al = Math.min(1, clearInfo.t / 1.5, (10 - clearInfo.t) * 2);
+      ctx.globalAlpha = al; ctx.fillStyle = 'rgba(30,18,4,.75)'; ctx.fillRect(0, VH / 2 - 90, VW, 180);
+      ctx.textAlign = 'center'; ctx.fillStyle = '#ffd75a'; ctx.font = 'bold 46px sans-serif'; ctx.fillText('👑 女王救出！', VW / 2, VH / 2 - 15);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif'; ctx.fillText(`${clearInfo.day}日目でクリア　―　このワールドで遊び続けられます`, VW / 2, VH / 2 + 30);
+      ctx.globalAlpha = 1;
+    }
+  }
   // 中央上
   const total = night ? D.NIGHT_LEN : D.DAY_LEN, remain = Math.max(0, Math.ceil(total - time));
   ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(VW / 2 - 120, 10, 240, 50);
@@ -911,7 +1078,7 @@ function drawHUD(dt, ms) {
   ctx.textAlign = 'center'; ctx.font = 'bold 14px sans-serif';
   if (cur) {
     const def = D.ITEMS[cur.id];
-    const hint = def.food ? (touchMode ? `（「食べる」ボタンで +${def.food}）` : `（右クリック/E で食べる +${def.food}）`) : def.place ? (touchMode ? '（置きたい場所をタップ）' : '（右クリックで置く）') : def.jaw || def.armor ? '（持っているだけで効果）' : '';
+    const hint = def.food ? (touchMode ? `（「食べる」ボタンで +${def.food}）` : `（右クリック/E で食べる +${def.food}）`) : def.place ? (touchMode ? '（置きたい場所をタップ）' : '（右クリック/O で置く）') : def.jaw || def.armor ? '（持ち物画面で装備できる）' : '';
     ctx.fillStyle = '#000'; ctx.fillText(def.n + hint, VW / 2 + 1, hy - 9); ctx.fillStyle = '#f0d9a8'; ctx.fillText(def.n + hint, VW / 2, hy - 10);
   }
   // 状況ヒント
@@ -934,7 +1101,7 @@ function drawHUD(dt, ms) {
   }
   if (!touchMode) {
     ctx.textAlign = 'left'; ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,.45)';
-    ctx.fillText('Tab 持ち物　C クラフト　E 食べる　F 出入り　Q 捨てる', 12, VH - 12);
+    ctx.fillText('Tab 持ち物・装備　C クラフト　E 調べる・使う・食べる　K 掘る・攻撃　O 置く　F 出入り　Q 捨てる', 12, VH - 12);
   } else drawTouchUI();
   // 睡眠
   if (ms && ms[16]) {
@@ -946,7 +1113,7 @@ function drawHUD(dt, ms) {
 
   // メッセージ
   ctx.textAlign = 'center'; ctx.font = 'bold 15px sans-serif';
-  let yy = 88;
+  let yy = 112;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i]; m.life -= dt;
     if (m.life <= 0) { msgs.splice(i, 1); continue; }
@@ -1008,9 +1175,16 @@ function renderPanel() {
   if (!panel || !D) return;
   const body = $('pbody');
   if (panel === 'inv') {
-    $('ptitle').innerHTML = '持ち物 <small>Tab / Esc で閉じる</small>';
-    body.innerHTML = '<h3>上の段がホットバー（1〜8）</h3>' + invGrid('inv') + (held >= 0 ? '<button id="dropBtn">つかんだ物を捨てる</button>' : '');
-    $('phint').textContent = 'タップ/クリックでつかむ → 別の枠で入れ替え ／ 右クリックでも捨てられる';
+    $('ptitle').innerHTML = '持ち物・装備 <small>Tab / Esc で閉じる</small>';
+    const jl = equip.jaw ? D.ITEMS[equip.jaw.id].jaw : 1, J = D.JAW[jl], ar = equip.armor ? D.ITEMS[equip.armor.id].armor : 0;
+    const hs = held >= 0 && inv[held], canEq = hs && (D.ITEMS[hs.id].jaw || D.ITEMS[hs.id].armor);
+    body.innerHTML = `<div class="invwrap"><div class="eqbox"><h3 style="margin-top:0">装備</h3>
+      <div class="eqrow">${slotHTML(equip.jaw, 'data-k="eq" data-e="jaw"', 'eq')}<div>大あご<br><b>${equip.jaw ? D.ITEMS[equip.jaw.id].n : 'ふつうの大あご'}</b></div></div>
+      <div class="eqrow">${slotHTML(equip.armor, 'data-k="eq" data-e="armor"', 'eq')}<div>よろい<br><b>${equip.armor ? D.ITEMS[equip.armor.id].n : 'なし'}</b></div></div>
+      <div class="stats">掘る速さ　${J.dig}<br>攻撃力　　${J.atk}<br>防御　　　${Math.round(ar * 100)}%</div></div>
+      <div><h3 style="margin-top:0">持ち物（上の段がホットバー 1〜8）</h3>${invGrid('inv')}
+      <div class="btns">${canEq ? '<button id="equipBtn" style="background:#3a7a3a;color:#fff">装備する</button>' : ''}${held >= 0 ? '<button id="dropBtn">捨てる</button>' : ''}</div></div></div>`;
+    $('phint').textContent = 'つかむ → 別の枠で入れ替え ／ 大あご・よろいをつかんで装備欄をタップで装備 ／ 装備欄をタップで外す';
   } else if (panel === 'craft') {
     $('ptitle').innerHTML = 'クラフト <small>C / Esc で閉じる</small>';
     const near = nearBenchC();
@@ -1025,7 +1199,7 @@ function renderPanel() {
       h += `<div class="rc"><img src="${iconURL(r.out)}"><div class="nm">${D.ITEMS[r.out].n}${r.n > 1 ? ' ×' + r.n : ''}${r.bench ? `<small>${near ? '作業台 ✓' : '作業台の近くで'}</small>` : ''}</div><div class="cost">${cost}</div><button data-craft="${ri}" ${ok ? '' : 'disabled'}>作る</button></div>`;
     });
     body.innerHTML = h + '</div>';
-    $('phint').textContent = '大あご・防具は持っているだけで効果あり。柱は崩落を防ぐ（土の柱：半径3マス、根っこの柱：半径5マス）';
+    $('phint').textContent = '大あご・よろいは作ると自動で装備（装備中なら持ち物へ）。柱は崩落を防ぐ（土の柱：半径3マス、根っこの柱：半径5マス）';
   } else if (panel === 'chest' && chest) {
     $('ptitle').innerHTML = 'チェスト <small>Esc で閉じる</small>';
     let h = '<div class="grid">';
@@ -1044,11 +1218,17 @@ function nearBenchC() {
 }
 $('pbody').addEventListener('click', e => {
   if (e.target.id === 'dropBtn') { socket.emit('drop', held); held = -1; renderPanel(); return; }
+  if (e.target.id === 'equipBtn') { socket.emit('equip', { slot: held }); held = -1; return; }
   const b = e.target.closest('[data-craft]');
   if (b) { socket.emit('craft', +b.dataset.craft); return; }
   const s = e.target.closest('.slot');
   if (!s) return;
   const k = s.dataset.k, i = +s.dataset.i;
+  if (k === 'eq') {
+    if (held >= 0) { socket.emit('equip', { slot: held }); held = -1; }
+    else socket.emit('equip', { unequip: s.dataset.e });
+    return;
+  }
   if (k === 'inv') {
     if (held < 0) { if (inv[i]) held = i; }
     else { socket.emit('swap', { a: held, b: i }); held = -1; }
