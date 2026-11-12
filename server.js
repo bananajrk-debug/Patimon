@@ -67,6 +67,11 @@ const OBJ = {
   branch: { solid: 1, hp: 36, natural: 1, drop: [['twig', 5]] },        // 落ちた枝
   bigLeaf: { solid: 0, hp: 12, natural: 1, drop: [['leaf', 4]] },       // 大きな落ち葉
   husk: { solid: 1, hp: 30, natural: 1, drop: [['shell', 2], ['meat', 1]] }, // 虫の亡骸（地下の空洞）
+  // 女王救出クエスト
+  clue: { solid: 0, hp: 4, natural: 1, quest: 1, drop: [] },                                   // 女王の羽（地下）
+  cocoon: { solid: 1, hp: 45, natural: 1, quest: 2, jaw: 2, need: '硬い糸の繭だ。「小石の大あご」が必要', drop: [['silk', 2]] },
+  clue3: { solid: 0, hp: 4, natural: 1, quest: 3, night: 1, drop: [] },                        // 空き缶の匂い（夜だけ）
+  queenCocoon: { solid: 1, hp: 60, natural: 1, quest: 4, drop: [['silk', 3]] },                // 女王が閉じ込められた繭
 };
 const RECIPES = [
   { out: 'bench', n: 1, cost: { twig: 4, leaf: 2 } },
@@ -87,6 +92,7 @@ const RECIPES = [
 const EN = {
   spider: { idx: 0, n: 'クモ', hp: 45, spd: 125, dmg: 12, r: 13, detect: 260, chew: 10, drops: [['meat', 1, 1], ['silk', 1, 2]] },
   beetle: { idx: 1, n: 'カブトムシ', hp: 120, spd: 62, dmg: 22, r: 15, detect: 200, chew: 25, drops: [['meat', 1, 2], ['shell', 1, 2]] },
+  boss: { idx: 2, n: '巨大グモ', hp: 900, spd: 92, dmg: 24, r: 34, detect: 520, chew: 30, drops: [['shell', 4, 5], ['silk', 6, 8], ['meat', 4, 5]] },
 };
 // 地上の資源（巣からの距離ゾーンごと）
 const RES = [
@@ -135,8 +141,11 @@ function removeItem(inv, id, n) {
     if (s && s.id === id) { const k = Math.min(n, s.n); s.n -= k; n -= k; if (!s.n) inv[i] = null; }
   }
 }
-const bestJaw = inv => inv.reduce((l, s) => (s && ITEMS[s.id].jaw > l ? ITEMS[s.id].jaw : l), 1);
-const bestArmor = inv => inv.reduce((a, s) => (s && ITEMS[s.id].armor > a ? ITEMS[s.id].armor : a), 0);
+// 装備（大あご・よろい）
+const jawOf = p => (p.equip && p.equip.jaw ? ITEMS[p.equip.jaw.id].jaw : 1);
+const armorOf = p => (p.equip && p.equip.armor ? ITEMS[p.equip.armor.id].armor : 0);
+const equipSlotOf = id => (ITEMS[id].jaw ? 'jaw' : ITEMS[id].armor ? 'armor' : null);
+const newEquip = () => ({ jaw: null, armor: null });
 
 // ================= ワールド生成 =================
 function genUnder(seed) {
@@ -212,6 +221,7 @@ function genTrees(w) {
     } else { x = rand(500, SW * T - 500); y = rand(500, SH * T - 500); }
     if (Math.hypot(x - NEST.x, y - NEST.y) < 420) continue;
     if (w.trees.some(t => Math.hypot(t.x - x, t.y - y) < 1100)) continue;
+    if (w.lair && Math.hypot(x - w.lair.x, y - w.lair.y) < 900) continue;   // 巨大グモの巣には生えない
     const r = rand(75, 105), tree = { x: Math.round(x), y: Math.round(y), r: Math.round(r), roots: [] };
     const n = randi(5, 7), base = rand(0, 6.28);
     for (let i = 0; i < n; i++) {
@@ -249,6 +259,16 @@ function genDeco(w) {
   }
 }
 function genSurface(w) {
+  // 巨大グモの巣（女王が捕まっている場所）。先に場所を決めて周りを空けておく
+  for (let k = 0; k < 500; k++) {
+    const x = rand(450, SW * T - 450), y = rand(450, SH * T - 450);
+    if (Math.hypot(x - NEST.x, y - NEST.y) / T < 72) continue;
+    w.lair = { x: Math.round(x), y: Math.round(y) };
+    break;
+  }
+  if (!w.lair) w.lair = { x: 600, y: 600 };
+  const block = { x: w.lair.x, y: w.lair.y, r: 380, k: 'block' };
+  w.rocks.push(block);
   genTrees(w);
   genDeco(w);
   let tries = 0;
@@ -276,6 +296,7 @@ function genSurface(w) {
       w.grass.set(ty * SW + tx, randi(0, 3));
     }
   }
+  w.rocks = w.rocks.filter(o => o !== block);
 }
 function randomSurfacePoint(w, z) {
   for (let k = 0; k < 60; k++) {
@@ -301,9 +322,23 @@ function pointNearTree(w, z) {
   }
   return null;
 }
+// 大きい石のまわりのランダムな地点（小石が落ちている）
+function pointNearRock(w, z) {
+  const rs = w.rocks.filter(o => !o.k && o.r >= 30 && zoneOf(o.x, o.y) === z);
+  if (!rs.length) return null;
+  for (let k = 0; k < 30; k++) {
+    const o = rs[randi(0, rs.length - 1)], a = rand(0, 6.28), d = o.r + rand(8, 55);
+    const x = o.x + Math.cos(a) * d, y = o.y + Math.sin(a) * d;
+    if (x < 2 * T || y < 2 * T || x > SW * T - 2 * T || y > SH * T - 2 * T) continue;
+    if (inRock(w, x, y, 8) || w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+  return null;
+}
 function spawnRes(w, r) {
   let pt = null;
   if ((r.item === 'twig' || r.item === 'leaf') && Math.random() < 0.8) pt = pointNearTree(w, r.z);   // 小枝・葉っぱは木の下に多い
+  if (r.item === 'pebble' && Math.random() < 0.9) pt = pointNearRock(w, r.z);                         // 小石は大きい石のまわり
   if (!pt) pt = randomSurfacePoint(w, r.z);
   if (!pt) return;
   const key = r.z + ':' + r.item;
@@ -335,6 +370,7 @@ function createWorld(code) {
   genSurface(w);
   w.under = genUnder(seed);
   genCaverns(w);
+  genQuest(w);
   for (const r of RES) for (let k = 0; k < r.n; k++) spawnRes(w, r);
   spawnNodes(w);
   recomputeSupport(w);
@@ -378,8 +414,8 @@ async function dbDelete(code) {
   if (fs.existsSync(f)) fs.unlinkSync(f);
 }
 function playerSave(p) {
-  if (p.dead) return { inv: new Array(INV_SIZE).fill(null), hp: 100, hunger: 70, layer: 'u', x: UCX * T, y: UCY * T, bed: p.bed, respawnAtBed: 1 };
-  return { inv: p.inv, hp: p.hp, hunger: p.hunger, layer: p.layer, x: p.x, y: p.y, bed: p.bed };
+  if (p.dead) return { inv: new Array(INV_SIZE).fill(null), equip: newEquip(), hp: 100, hunger: 70, layer: 'u', x: UCX * T, y: UCY * T, bed: p.bed, respawnAtBed: 1 };
+  return { inv: p.inv, equip: p.equip, hp: p.hp, hunger: p.hunger, layer: p.layer, x: p.x, y: p.y, bed: p.bed };
 }
 function serialize(w) {
   for (const p of Object.values(w.players)) w.saved[p.name] = playerSave(p);
@@ -389,7 +425,7 @@ function serialize(w) {
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
     objs: { s: [...w.objs.s], u: [...w.objs.u] },
-    items, saved: w.saved,
+    items, saved: w.saved, lair: w.lair, quest: w.quest, queen: w.queen,
   };
 }
 function deserialize(code, d) {
@@ -404,6 +440,9 @@ function deserialize(code, d) {
     w.items.set(it.id, it);
     if (it.res) w.resCount[it.res] = (w.resCount[it.res] || 0) + 1;
   }
+  if (d.quest) { w.lair = d.lair; w.quest = d.quest; w.queen = d.queen; }
+  else { w.lair = { x: 600, y: 600 }; genQuest(w); }            // 古いセーブ用
+  if (w.quest.stage === 3 && !w.quest.bossDead) spawnBoss(w);
   recomputeSupport(w);
   return w;
 }
@@ -461,7 +500,7 @@ function give(w, p, id, n) {
   const left = addItem(p.inv, id, n);
   if (left) dropItems(w, p.layer, p.x, p.y, [{ id, n: left }]);
 }
-const emitInv = p => io.to(p.id).emit('inv', { inv: p.inv, sel: p.sel });
+const emitInv = p => io.to(p.id).emit('inv', { inv: p.inv, sel: p.sel, equip: p.equip });
 function setObj(w, l, idx, o) {
   if (o) w.objs[l].set(idx, o); else w.objs[l].delete(idx);
   w.objQ.set(l + idx, { l, i: idx, o: o ? { t: o.t, hp: Math.round(o.hp), a: o.a || 0 } : null });
@@ -523,6 +562,7 @@ function recomputeSupport(w) {
       if (x < 0 || y < 0 || x >= UW || y >= UH || isNatSolid(g[y * UW + x])) { ok = true; break; }
     }
     if (!ok) for (const [px, py, r] of pillars) if ((px - tx) ** 2 + (py - ty) ** 2 <= r * r + 0.5) { ok = true; break; }
+    if (!ok) { const qo = w.objs.u.get(i); if (qo && OBJ[qo.t].quest) ok = true; }   // 手がかりの部屋は崩れない
     if (ok) w.cracks.delete(i);
     else if (!w.cracks.has(i)) w.cracks.set(i, CRACK_TIME);
   }
@@ -563,10 +603,10 @@ function makePlayer(w, id, name) {
     id, name, color: COLORS[Object.keys(w.players).length % COLORS.length],
     layer: 'u', x: UCX * T, y: UCY * T, a: 0, hp: 100, hunger: 100,
     inv: new Array(INV_SIZE).fill(null), sel: 0, dead: false, respawn: 0,
-    ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
+    equip: newEquip(), slowT: 0, ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
   };
   if (s) {
-    Object.assign(p, { inv: s.inv, hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y, bed: s.bed || null });
+    Object.assign(p, { inv: s.inv, equip: s.equip || newEquip(), hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y, bed: s.bed || null });
     if (s.respawnAtBed) { const b = bedPos(w, p); if (b) Object.assign(p, { layer: b.l, x: b.x, y: b.y }); }
   } else addItem(p.inv, 'crumb', 5);
   return p;
@@ -578,8 +618,9 @@ function teleport(p, l, x, y) {
 function killPlayer(w, p, why, buried) {
   if (p.dead) return;
   p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false; p.sleep = false;
-  if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), p.inv);   // 持ち物をその場に落とす
+  if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), [...p.inv, p.equip.jaw, p.equip.armor]);   // 持ち物と装備をその場に落とす
   p.inv = new Array(INV_SIZE).fill(null);
+  p.equip = newEquip();
   emitInv(p);
   msg(w, `💀 ${p.name}が${why}${buried ? '（持ち物は土の中に消えた）' : ''}`);
 }
@@ -635,6 +676,7 @@ function destroyObj(w, l, idx, byPlayer) {
     emitInv(byPlayer);
   } else if (!OBJ[o.t].natural) msg(w, `⚠ ${ITEMS[o.t].n}が壊された！`);
   if (OBJ[o.t].support) recomputeSupport(w);
+  if (byPlayer && OBJ[o.t].quest) advanceQuest(w, OBJ[o.t].quest, byPlayer);
 }
 function damageObj(w, l, idx, amount) {
   const o = w.objs[l].get(idx);
@@ -646,7 +688,7 @@ function damageObj(w, l, idx, amount) {
 
 function handleHold(w, p) {
   if (Math.hypot(p.ax - p.x, p.ay - p.y) > REACH + 8) { p.dig = null; return; }
-  const jawLv = bestJaw(p.inv), jaw = JAW[jawLv];
+  const jawLv = jawOf(p), jaw = JAW[jawLv];
   // 1) 敵を攻撃
   if (p.atkCd <= 0) {
     for (const e of w.enemies) {
@@ -670,7 +712,13 @@ function handleHold(w, p) {
   const idx = ty * LW(l) + tx;
   const o = w.objs[l].get(idx);
   let kind, hard;
-  if (o) { kind = 'o'; hard = OBJ[o.t].hp; }
+  if (o) {
+    if (OBJ[o.t].quest) {
+      const why = questBlock(w, o.t, jawLv);
+      if (why) { if (p.warnT <= 0) { msgTo(p, why); p.warnT = 3; } p.dig = null; return; }
+    }
+    kind = 'o'; hard = OBJ[o.t].hp;
+  }
   else if (l === 'u') {
     const info = TILE_INFO[w.under[idx]];
     if (!info) { p.dig = null; return; }
@@ -708,7 +756,7 @@ function handleHold(w, p) {
 function updatePlayers(w) {
   for (const p of Object.values(w.players)) {
     if (p.dead) { p.respawn -= DT; if (p.respawn <= 0) respawnPlayer(w, p); continue; }
-    p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT;
+    p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT; p.slowT -= DT;
     p.hunger -= (p.sleep ? 0.14 : 0.28) * DT;
     if (p.sleep) p.hp = Math.min(100, p.hp + 4 * DT);
     if (p.hunger <= 0) { p.hunger = 0; p.hp -= 3 * DT; }
@@ -765,6 +813,7 @@ function spawnEnemy(w, type, den, raider) {
 }
 function killEnemy(w, e) {
   e.dead = true;
+  if (e.type === 'boss') { w.quest.bossDead = true; msg(w, '🏆 巨大グモを倒した！ 巣の中心の繭を破って女王を助け出せ！'); }
   for (const [id, a, b] of EN[e.type].drops) {
     const n = randi(a, b);
     for (let k = 0; k < n; k++) addGroundItem(w, { layer: e.layer, x: Math.round(e.x + rand(-12, 12)), y: Math.round(e.y + rand(-12, 12)), item: id, n: 1 });
@@ -784,6 +833,7 @@ function updateEnemies(w) {
   }
   for (const e of w.enemies) {
     if (e.dead) continue;
+    if (e.type === 'boss') { if (e.hp <= 0) killEnemy(w, e); else updateBoss(w, e, alive); continue; }
     const s = EN[e.type];
     e.atkCd -= DT; e.hitT -= DT; e.avoidT -= DT; e.life += DT;
     if (e.retreat && e.life > 400) { e.dead = true; continue; }
@@ -797,7 +847,8 @@ function updateEnemies(w) {
 
     // ターゲット
     let tgt = null, best = s.detect;
-    if (!e.retreat) for (const p of alive) {
+    const q = w.queen, targets = q && q.state === 'follow' && q.faint <= 0 ? [...alive, q] : alive;
+    if (!e.retreat) for (const p of targets) {
       if (p.layer !== e.layer) continue;
       const d = dist(p, e);
       if (d < best) { best = d; tgt = p; }
@@ -806,9 +857,10 @@ function updateEnemies(w) {
       e.a = Math.atan2(tgt.y - e.y, tgt.x - e.x);
       if (e.atkCd <= 0) {
         e.atkCd = 1.0;
-        tgt.hp -= s.dmg * (1 - bestArmor(tgt.inv));
+        tgt.hp -= s.dmg * (1 - armorOf(tgt));
         if (tgt.sleep) { wake(tgt); msgTo(tgt, '⚠ 攻撃されて目が覚めた！'); }
-        if (tgt.hp <= 0) killPlayer(w, tgt, `${s.n}にやられた…`);
+        if (tgt === w.queen) { if (tgt.hp <= 0) { tgt.faint = 10; tgt.hp = 0; msg(w, '⚠ 女王が気を失った！ 10秒守り抜け！'); } }
+        else if (tgt.hp <= 0) killPlayer(w, tgt, `${s.n}にやられた…`);
       }
       continue;
     }
@@ -872,6 +924,148 @@ function updateEnemies(w) {
   w.enemies = w.enemies.filter(e => !e.dead);
 }
 
+
+// ================= 女王救出クエスト =================
+// stage 0:手がかり①(地下) 1:手がかり②(巨木の繭) 2:手がかり③(夜の空き缶) 3:巨大グモの巣 4:女王を護衛 5:クリア
+function genQuest(w) {
+  const q = { stage: 0, bossDead: false, pts: {}, clearDay: 0 };
+  // ① 地下の小部屋に女王の羽
+  for (let k = 0; k < 800 && !q.pts.c1; k++) {
+    const a = rand(0, 6.28), d = rand(22, 34);
+    const cx = Math.round(UCX + Math.cos(a) * d), cy = Math.round(UCY + Math.sin(a) * d);
+    if (cx < 6 || cy < 6 || cx > UW - 7 || cy > UH - 7) continue;
+    let ok = true;
+    for (let y = cy - 3; y <= cy + 3 && ok; y++) for (let x = cx - 3; x <= cx + 3; x++) {
+      const v = w.under[y * UW + x];
+      if (v === U.HARD || v === U.BIGROOT || v === U.OPEN) { ok = false; break; }
+    }
+    if (!ok && k < 700) continue;
+    for (let y = cy - 1; y <= cy + 1; y++) for (let x = cx - 1; x <= cx + 1; x++) w.under[y * UW + x] = U.OPEN;
+    w.under[(cy - 2) * UW + cx - 1] = U.GLOW; w.under[(cy + 2) * UW + cx + 1] = U.GLOW;
+    w.objs.u.set(cy * UW + cx, { t: 'clue', hp: OBJ.clue.hp });
+    q.pts.c1 = { l: 'u', x: (cx + 0.5) * T, y: (cy + 0.5) * T };
+  }
+  const placeNear = (cx, cy, r0, r1, t) => {
+    for (let k = 0; k < 60; k++) {
+      const a = rand(0, 6.28), d = rand(r0, r1);
+      const tx = Math.floor((cx + Math.cos(a) * d) / T), ty = Math.floor((cy + Math.sin(a) * d) / T);
+      if (tx < 2 || ty < 2 || tx >= SW - 2 || ty >= SH - 2 || inRock(w, (tx + 0.5) * T, (ty + 0.5) * T, 16) || w.objs.s.has(ty * SW + tx)) continue;
+      w.objs.s.set(ty * SW + tx, { t, hp: OBJ[t].hp });
+      return { l: 's', x: (tx + 0.5) * T, y: (ty + 0.5) * T };
+    }
+    return null;
+  };
+  const far = () => { for (let k = 0; k < 100; k++) { const p = randomSurfacePoint(w, 3); if (p) return p; } return { x: 400, y: 400 }; };
+  // ② いちばん遠い巨木の根元に糸の繭
+  for (const t of [...w.trees].sort((a, b) => dist(b, NEST) - dist(a, NEST))) { q.pts.c2 = placeNear(t.x, t.y, t.r + 30, t.r + 80, 'cocoon'); if (q.pts.c2) break; }
+  if (!q.pts.c2) { const p = far(); q.pts.c2 = placeNear(p.x, p.y, 0, 40, 'cocoon'); }
+  // ③ 空き缶のそば（夜だけ匂いが強くなる）
+  for (const c of w.deco.filter(d => d.t === 'can').concat(w.deco.filter(d => d.t === 'cap'))) { q.pts.c3 = placeNear(c.x, c.y, c.r + 20, c.r + 45, 'clue3'); if (q.pts.c3) break; }
+  if (!q.pts.c3) { const p = far(); q.pts.c3 = placeNear(p.x, p.y, 0, 40, 'clue3'); }
+  // 巨大グモの巣の中心に女王の繭
+  const ltx = Math.floor(w.lair.x / T), lty = Math.floor(w.lair.y / T);
+  w.objs.s.set(lty * SW + ltx, { t: 'queenCocoon', hp: OBJ.queenCocoon.hp });
+  q.pts.lair = { l: 's', x: (ltx + 0.5) * T, y: (lty + 0.5) * T };
+  w.quest = q;
+  w.queen = { state: 'captive', layer: 's', x: q.pts.lair.x, y: q.pts.lair.y, hp: 200, faint: 0, a: 0 };
+}
+function questTarget(w) {
+  const q = w.quest;
+  if (!q) return null;
+  return [q.pts.c1, q.pts.c2, q.pts.c3, q.pts.lair, { l: 's', x: NEST.x, y: NEST.y }][q.stage] || null;
+}
+// 調べられない理由（なければnull）
+function questBlock(w, t, jawLv) {
+  const d = OBJ[t];
+  if (d.quest !== w.quest.stage + 1) return 'かすかに女王の匂いがする…でも今はまだ手がかりがつながらない';
+  if (d.jaw && jawLv < d.jaw) return d.need;
+  if (d.night && !w.isNight) return '昼間は匂いが弱くて分からない…夜にもう一度調べよう';
+  if (t === 'queenCocoon' && !w.quest.bossDead) return '巨大グモが見張っている！先に倒せ！';
+  return null;
+}
+function advanceQuest(w, n, p) {
+  const q = w.quest;
+  if (q.stage !== n - 1) return;
+  q.stage = n;
+  const text = {
+    1: `🔍 ${p.name}が「女王の羽」を見つけた！ 匂いは地上の遠くの巨木へ続いている…（手がかり 1/3）`,
+    2: `🔍 ${p.name}が繭の中から「女王の触角のかけら」を見つけた！ 匂いは空き缶の方へ…（手がかり 2/3）`,
+    3: `🔍 ${p.name}が空き缶のそばで強い匂いを見つけた！ 巨大グモの巣の場所が分かった！（手がかり 3/3）`,
+    4: `👑 女王を助け出した！ 巣の入口まで護衛しろ！`,
+  }[n];
+  msg(w, text);
+  io.to(w.code).emit('questUp', n);
+  if (n === 3) spawnBoss(w);
+  if (n === 4) { w.queen.state = 'follow'; w.queen.hp = 200; }
+}
+function spawnBoss(w) {
+  if (w.quest.bossDead || w.enemies.some(e => e.type === 'boss')) return;
+  const s = EN.boss;
+  w.enemies.push({ id: w.nextId++, type: 'boss', layer: 's', x: w.lair.x + 120, y: w.lair.y, a: 0, hp: s.hp, maxHp: s.hp, atkCd: 0, hitT: 0, raider: false, retreat: false, home: w.lair, wa: 0, wt: 0, avoidT: 0, avoidDir: 0, life: 0, sumT: 5, webT: 3 });
+}
+function updateBoss(w, e, alive) {
+  const s = EN.boss;
+  e.atkCd -= DT; e.hitT -= DT; e.sumT -= DT; e.webT -= DT;
+  const near = alive.filter(p => p.layer === 's' && dist(p, w.lair) < 560);
+  let tgt = null, best = 1e9;
+  for (const p of near) { const d = dist(p, e); if (d < best) { best = d; tgt = p; } }
+  let gx = w.lair.x, gy = w.lair.y;
+  if (tgt) {
+    if (best < s.r + PR + 8) {
+      e.a = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+      if (e.atkCd <= 0) {
+        e.atkCd = 1.1;
+        tgt.hp -= s.dmg * (1 - armorOf(tgt)); wake(tgt);
+        if (tgt.hp <= 0) killPlayer(w, tgt, '巨大グモにやられた…');
+      }
+      gx = null;
+    } else if (dist(e, w.lair) < 520) { gx = tgt.x; gy = tgt.y; }
+    if (e.webT <= 0) {                          // 糸を吐いて足止め
+      e.webT = 4.5;
+      const v = near[randi(0, near.length - 1)];
+      if (v && dist(v, e) < 430) { v.slowT = 2.5; io.to(w.code).emit('web', [Math.round(e.x), Math.round(e.y), Math.round(v.x), Math.round(v.y)]); }
+    }
+    if (e.sumT <= 0) {                          // 子グモを呼ぶ
+      e.sumT = 8;
+      if (w.enemies.filter(x => x.home === w.lair && x.type === 'spider').length < 6) {
+        for (let k = 0; k < 2; k++) spawnEnemy(w, 'spider', { x: e.x, y: e.y }, false), (w.enemies[w.enemies.length - 1].home = w.lair);
+        msg(w, '🕷 巨大グモが子グモを呼んだ！');
+      }
+    }
+  } else e.hp = Math.min(e.maxHp, e.hp + 6 * DT);
+  if (gx !== null && Math.hypot(gx - e.x, gy - e.y) > 30) {
+    e.a = Math.atan2(gy - e.y, gx - e.x);
+    e.x += Math.cos(e.a) * s.spd * DT; e.y += Math.sin(e.a) * s.spd * DT;
+  }
+  collide(w, 's', e, s.r * 0.7);
+}
+function updateQueen(w) {
+  const q = w.queen;
+  if (!q) return;
+  if (q.state === 'captive') return;
+  const alive = Object.values(w.players).filter(p => !p.dead);
+  if (q.state === 'home') {                     // 巣に戻った女王のそばにいると回復する
+    for (const p of alive) if (p.layer === 'u' && dist(p, q) < 130) p.hp = Math.min(100, p.hp + 3 * DT);
+    return;
+  }
+  if (q.faint > 0) { q.faint -= DT; if (q.faint <= 0) { q.hp = 100; msg(w, '👑 女王が目を覚ました'); } return; }
+  let tgt = null, best = 700;
+  for (const p of alive) if (p.layer === q.layer) { const d = dist(p, q); if (d < best) { best = d; tgt = p; } }
+  if (q.layer === 's' && dist(q, NEST) < 260 && tgt) tgt = { x: NEST.x, y: NEST.y }, best = 999;   // 巣が見えたら自分で入っていく
+  if (tgt && best > 55) {
+    q.a = Math.atan2(tgt.y - q.y, tgt.x - q.x);
+    q.x += Math.cos(q.a) * 78 * DT; q.y += Math.sin(q.a) * 78 * DT;
+    collide(w, q.layer, q, 9);
+  }
+  if (dist(q, NEST) < NEST.r + 12) {            // 巣に到着！
+    q.state = 'home'; q.layer = 'u'; q.x = (UCX + 1) * T; q.y = (UCY + 1) * T;
+    w.quest.stage = 5; w.quest.clearDay = w.day;
+    msg(w, `🎉 女王が巣に帰ってきた！ ${w.day}日目でクリア！`);
+    io.to(w.code).emit('clear', { day: w.day });
+    io.to(w.code).emit('questUp', 5);
+  }
+}
+
 // ================= 環境（昼夜・雨・草・資源・湧き） =================
 function updateEnv(w) {
   w.time += DT;
@@ -926,11 +1120,13 @@ function broadcast(w) {
     p: Object.values(w.players).map(p => [
       p.id, p.name, p.color, p.layer === 'u' ? 1 : 0, Math.round(p.x), Math.round(p.y), +p.a.toFixed(2),
       Math.round(p.hp), Math.round(p.hunger), p.dead ? 1 : 0, Math.ceil(p.respawn), p.biteT > 0 ? 1 : 0,
-      p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, bestJaw(p.inv), bestArmor(p.inv), p.sleep ? 1 : 0,
+      p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, jawOf(p), armorOf(p), p.sleep ? 1 : 0, p.slowT > 0 ? 1 : 0,
     ]),
     e: w.enemies.map(e => [e.id, EN[e.type].idx, e.layer === 'u' ? 1 : 0, Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
     k: [...w.cracks].map(([i, t]) => [i, +t.toFixed(1)]),
     c: [w.day, +w.time.toFixed(1), w.isNight ? 1 : 0, w.rain > 0 ? 1 : 0, w.skipping ? 1 : 0],
+    q: (() => { const t = questTarget(w); return [w.quest.stage, t ? (t.l === 'u' ? 1 : 0) : -1, t ? Math.round(t.x) : 0, t ? Math.round(t.y) : 0, w.quest.bossDead ? 1 : 0]; })(),
+    qn: w.queen ? [Math.round(w.queen.x), Math.round(w.queen.y), w.queen.layer === 'u' ? 1 : 0, ['captive', 'follow', 'home'].indexOf(w.queen.state), Math.round(w.queen.hp / 2), w.queen.faint > 0 ? 1 : 0, +(w.queen.a || 0).toFixed(2)] : null,
   });
 }
 function flush(w) {
@@ -961,6 +1157,7 @@ function tickWorld(w) {
   w.tickN++;
   updatePlayers(w);
   updateEnemies(w);
+  updateQueen(w);
   updateCracks(w);
   updateEnv(w);
   flush(w);
@@ -974,13 +1171,14 @@ setInterval(() => { for (const code in rooms) tickWorld(rooms[code]); }, 1000 / 
 function fullSync(w, p) {
   return {
     code: w.code, me: p.id,
-    defs: { T, SW, SH, UW, UH, NEST, UENT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, DAY_LEN, NIGHT_LEN, INV_SIZE, CHEST_SIZE, SUPPORT_RANGE },
+    defs: { T, SW, SH, UW, UH, NEST, UENT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, JAW, DAY_LEN, NIGHT_LEN, INV_SIZE, CHEST_SIZE, SUPPORT_RANGE },
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
     objs: { s: [...w.objs.s].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]), u: [...w.objs.u].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]) },
     items: [...w.items.values()].map(compactItem),
     you: { l: p.layer, x: p.x, y: p.y, s: p.tpSeq },
-    inv: p.inv, sel: p.sel,
+    lair: w.lair, quest: { stage: w.quest.stage, clearDay: w.quest.clearDay },
+    inv: p.inv, sel: p.sel, equip: p.equip,
   };
 }
 
@@ -1044,6 +1242,13 @@ io.on('connection', socket => {
     const idx = ty * LW(l) + tx, o = w.objs[l].get(idx);
     if (o && o.t === 'chest') { p.openChest = { l, idx }; socket.emit('chest', { l, i: idx, items: o.items }); return; }
     if (o && o.t === 'bench') { socket.emit('openCraft'); return; }
+    if (o && OBJ[o.t].quest) {
+      const why = questBlock(w, o.t, jawOf(p));
+      if (why) msgTo(p, why);
+      else if (OBJ[o.t].solid) msgTo(p, '長押し（K）でかじって破ろう');
+      else destroyObj(w, l, idx, p);
+      return;
+    }
     if (o && o.t === 'bed') {
       p.bed = { l, i: idx };
       if (!w.isNight) { msgTo(p, '🛏 ここを復活地点にした（夜になったら眠れる）'); return; }
@@ -1082,7 +1287,9 @@ io.on('connection', socket => {
     if (r.bench && !nearBench(w, p)) { msgTo(p, '作業台の近くでないと作れない'); return; }
     for (const id in r.cost) if (countItem(p.inv, id) < r.cost[id]) return;
     for (const id in r.cost) removeItem(p.inv, id, r.cost[id]);
-    give(w, p, r.out, r.n);
+    const slot = equipSlotOf(r.out);
+    if (slot && !p.equip[slot]) { p.equip[slot] = { id: r.out, n: 1 }; msgTo(p, `${ITEMS[r.out].n}を装備した`); }   // 空いていれば自動で装備
+    else give(w, p, r.out, r.n);
     emitInv(p);
   });
 
@@ -1094,6 +1301,28 @@ io.on('connection', socket => {
     if (A && B && A.id === B.id && B.n < maxStack(B.id)) {
       const k = Math.min(A.n, maxStack(B.id) - B.n); B.n += k; A.n -= k; if (!A.n) p.inv[a] = null;
     } else { p.inv[a] = B; p.inv[b] = A; }
+    emitInv(p);
+  });
+
+  // 装備する（持ち物の枠から）／外す
+  socket.on('equip', d => {
+    const c = ctx(); if (!c || !d || c.p.dead) return;
+    const { p } = c;
+    if (d.unequip === 'jaw' || d.unequip === 'armor') {
+      const cur = p.equip[d.unequip];
+      if (!cur) return;
+      const left = addItem(p.inv, cur.id, 1);
+      if (left) { msgTo(p, '持ち物がいっぱいで外せない'); return; }
+      p.equip[d.unequip] = null;
+    } else {
+      const i = d.slot | 0, s = p.inv[i];
+      if (!s) return;
+      const slot = equipSlotOf(s.id);
+      if (!slot) return;
+      const old = p.equip[slot];
+      p.equip[slot] = { id: s.id, n: 1 };
+      p.inv[i] = old;
+    }
     emitInv(p);
   });
 
@@ -1137,6 +1366,8 @@ io.on('connection', socket => {
     if (d.night) { w.isNight = false; w.time = DAY_LEN - 0.1; }
     if (d.give) { give(w, p, d.give, d.n || 1); emitInv(p); }
     if (d.pos) { teleport(p, d.pos.l, d.pos.x, d.pos.y); }
+    if (d.heal) { p.hp = 100; p.hunger = 100; }
+    if (d.queen && w.queen) { w.queen.x = d.queen.x; w.queen.y = d.queen.y; }
   });
 
   socket.on('disconnect', () => {
