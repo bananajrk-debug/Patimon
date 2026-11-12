@@ -2,12 +2,15 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>ANT SURVIVAL</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #0e0a06; font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif; color: #eee; user-select: none; }
-  canvas { display: block; }
+  canvas { display: block; touch-action: none; }
+  body { touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; }
+  #dropBtn { margin-top: 10px; padding: 8px 16px; border: none; border-radius: 5px; background: #8a3a2a; color: #fff; font-weight: bold; font-family: inherit; cursor: pointer; }
   .hidden { display: none !important; }
   #lobby {
     position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
@@ -99,7 +102,8 @@ addEventListener('resize', resize); resize();
 // ================= 状態 =================
 let D = null, MEID = null, CODE = '';
 const me = { l: 'u', x: 0, y: 0, a: 0, s: 1, phase: 0 };
-let inv = [], sel = 0, under = null, rocks = [], dens = [];
+let inv = [], sel = 0, under = null, rocks = [], dens = [], trees = [], deco = [];
+let touchMode = false, joy = null, wt = null, wakeT = 0;
 const objs = { s: new Map(), u: new Map() }, items = new Map();
 let grass = new Map(), st = null, cracks = new Map();
 const RP = {}, RE = {};
@@ -127,9 +131,9 @@ socket.on('err', t => $('err').textContent = t);
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 socket.on('world', d => {
   D = d.defs; MEID = d.me; CODE = d.code;
-  rocks = d.rocks; dens = d.dens; grass = new Map(d.grass); under = b64(d.under);
-  objs.s = new Map(d.objs.s.map(([i, t, hp]) => [i, { t, hp }]));
-  objs.u = new Map(d.objs.u.map(([i, t, hp]) => [i, { t, hp }]));
+  rocks = d.rocks; dens = d.dens; trees = d.trees || []; deco = d.deco || []; grass = new Map(d.grass); under = b64(d.under);
+  objs.s = new Map(d.objs.s.map(([i, t, hp, a]) => [i, { t, hp, a }]));
+  objs.u = new Map(d.objs.u.map(([i, t, hp, a]) => [i, { t, hp, a }]));
   items.clear(); for (const it of d.items) addItemC(it);
   Object.assign(me, { l: d.you.l, x: d.you.x, y: d.you.y, s: d.you.s });
   inv = d.inv; sel = d.sel; mmDirty = true; gameover = null; closePanel();
@@ -196,6 +200,8 @@ addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.l 
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 cv.addEventListener('mousedown', e => {
   if (!inGame()) return;
+  const h = hotbarHit(e.clientX, e.clientY);
+  if (h >= 0) { setSel(h); return; }
   if (e.button === 0) mouse.l = true;
   if (e.button === 2) { const a = aim(); socket.emit('use', { x: a.x, y: a.y }); }
 });
@@ -203,11 +209,76 @@ addEventListener('mouseup', e => { if (e.button === 0) mouse.l = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('wheel', e => { if (inGame()) setSel((sel + (e.deltaY > 0 ? 1 : 7)) % 8); }, { passive: true });
 function setSel(i) { sel = i; socket.emit('sel', i); }
+
+// ---- タッチ操作（iPad） ----
+function hotbarLayout() { const sz = touchMode ? 50 : 54, gap = touchMode ? 5 : 6, w = 8 * sz + 7 * gap; return { sz, gap, x: VW / 2 - w / 2, y: VH - sz - 16 }; }
+function hotbarHit(x, y) {
+  const h = hotbarLayout();
+  if (y < h.y || y > h.y + h.sz || x < h.x) return -1;
+  const i = Math.floor((x - h.x) / (h.sz + h.gap));
+  return i >= 0 && i < 8 && x - h.x - i * (h.sz + h.gap) <= h.sz ? i : -1;
+}
+function canEnter() {
+  if (!D) return false;
+  if (me.l === 's') return Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30;
+  return Math.hypot(me.x - (D.UENT.tx + .5) * D.T, me.y - (D.UENT.ty + .5) * D.T) < D.T * 1.3;
+}
+function touchButtons() {
+  const r = 32, x1 = VW - 52, x2 = VW - 128, y1 = VH - 60, y2 = VH - 140;
+  return [
+    { id: 'inv', label: '持ち物', x: x1, y: y1, r },
+    { id: 'craft', label: 'クラフト', x: x2, y: y1, r },
+    { id: 'eat', label: '食べる', x: x1, y: y2, r },
+    { id: 'enter', label: me.l === 'u' ? '地上へ' : '巣へ', x: x2, y: y2, r, on: canEnter() },
+  ];
+}
+function pressBtn(id) {
+  if (id === 'inv') panel === 'inv' ? closePanel() : openPanel('inv');
+  if (id === 'craft') panel === 'craft' ? closePanel() : openPanel('craft');
+  if (id === 'eat') socket.emit('eat');
+  if (id === 'enter') socket.emit('enter');
+}
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (!inGame()) return;
+  touchMode = true;
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    const b = touchButtons().find(b => Math.hypot(b.x - x, b.y - y) < b.r + 8);
+    if (b) { pressBtn(b.id); continue; }
+    const h = hotbarHit(x, y);
+    if (h >= 0) { setSel(h); continue; }
+    if (!joy && x < VW * 0.42 && y > 110) { joy = { id: t.identifier, ox: x, oy: y, x, y }; continue; }
+    if (!wt) { wt = { id: t.identifier, t0: performance.now(), hold: false, sx: x, sy: y }; mouse.x = x; mouse.y = y; }
+  }
+}, { passive: false });
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (joy && t.identifier === joy.id) { joy.x = t.clientX; joy.y = t.clientY; }
+    if (wt && t.identifier === wt.id) {
+      mouse.x = t.clientX; mouse.y = t.clientY;
+      if (!wt.hold && Math.hypot(t.clientX - wt.sx, t.clientY - wt.sy) > 14) { wt.hold = true; mouse.l = true; }
+    }
+  }
+}, { passive: false });
+function touchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (joy && t.identifier === joy.id) joy = null;
+    if (wt && t.identifier === wt.id) {
+      if (!wt.hold) { const a = aim(); socket.emit('use', { x: a.x, y: a.y }); }   // タップ＝置く・使う・開く
+      mouse.l = false; wt = null;
+    }
+  }
+}
+cv.addEventListener('touchend', touchEnd, { passive: false });
+cv.addEventListener('touchcancel', touchEnd, { passive: false });
 const aim = () => ({ x: me.x + (mouse.x - VW / 2) / Z, y: me.y + (mouse.y - VH / 2) / Z });
 
 // ================= 衝突（サーバーと同じ） =================
 const LW = l => l === 'u' ? D.UW : D.SW, LH = l => l === 'u' ? D.UH : D.SH;
-const isNatSolid = v => v >= 1 && v <= 6;
+const isNatSolid = v => (v >= 1 && v <= 6) || v === 8;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function solidAt(l, tx, ty) {
   if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return true;
@@ -271,6 +342,7 @@ const ICON = {
   jaw3: g => { ln(g, [[-4, 10], [-10, -2], [-2, -13]], '#2a5a2e', 5); ln(g, [[4, 10], [10, -2], [2, -13]], '#2a5a2e', 5); ln(g, [[-4, 10], [-10, -2]], '#6fa86a', 1.5); },
   armor1: g => { g.fillStyle = '#4f9a33'; g.beginPath(); g.moveTo(-8, -12); g.lineTo(8, -12); g.lineTo(13, 12); g.lineTo(-13, 12); g.closePath(); g.fill(); ln(g, [[0, -12], [0, 12]], '#2f6a1f', 1.5); ln(g, [[0, -4], [-7, 4]], '#2f6a1f', 1); ln(g, [[0, -4], [7, 4]], '#2f6a1f', 1); },
   armor2: g => { g.fillStyle = '#1f3a22'; g.beginPath(); g.moveTo(-12, -10); g.lineTo(12, -10); g.lineTo(9, 12); g.lineTo(-9, 12); g.closePath(); g.fill(); ell(g, -4, -4, 4, 2, -.4, '#4f7a4a'); ln(g, [[0, -10], [0, 12]], '#0b140c', 1.5); },
+  bed: g => { ell(g, 0, 2, 15, 11, 0, '#3f7a2a'); ell(g, 0, 1, 12, 8, 0, '#5c9a3a'); ell(g, -6, -2, 5, 4, 0, '#8fc46a'); ln(g, [[-12, 2], [12, 2]], '#2f5a1f', 1); },
   bag: g => { ell(g, 0, 4, 12, 10, 0, '#6b4f2e'); g.fillStyle = '#7d5c36'; g.fillRect(-5, -10, 10, 6); ln(g, [[-6, -4], [6, -4]], '#3a2a14', 2); circ(g, 0, 4, 3, '#e2b45c'); },
 };
 function drawIcon(g, id, x, y, s) {
@@ -342,7 +414,7 @@ const PAT = {
   ground: makePat('#6e4f2c', ['rgba(40,25,10,.3)', 'rgba(150,115,70,.3)', 'rgba(200,180,140,.35)']),
   floor: makePat('#2e2014', ['rgba(0,0,0,.25)', 'rgba(90,65,40,.35)']),
 };
-const UCOL = { 1: ['#6b4a2b', '#4d341d'], 2: ['#a4643a', '#7a4626'], 3: ['#6b4a2b', '#4d341d'], 4: ['#6b4a2b', '#4d341d'], 5: ['#45444b', '#2c2b30'], 6: ['#5e5043', '#3e342b'] };
+const UCOL = { 1: ['#6b4a2b', '#4d341d'], 2: ['#a4643a', '#7a4626'], 3: ['#6b4a2b', '#4d341d'], 4: ['#6b4a2b', '#4d341d'], 5: ['#45444b', '#2c2b30'], 6: ['#5e5043', '#3e342b'], 8: ['#3b2615', '#24170c'] };
 
 // ================= メインループ =================
 let last = performance.now(), TT = 0, sendT = 0;
@@ -364,12 +436,22 @@ requestAnimationFrame(loop);
 function update(dt) {
   const ms = myState(), dead = ms && ms[9];
   const a = aim();
-  if (!dead) {
-    const dx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-    const dy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  if (wt && !wt.hold && performance.now() - wt.t0 > 230) { wt.hold = true; mouse.l = true; }   // 長押し＝掘る・攻撃
+  let dx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let dy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  let spd = 1;
+  if (joy) {
+    const jx = (joy.x - joy.ox) / 55, jy = (joy.y - joy.oy) / 55, jl = Math.hypot(jx, jy);
+    if (jl > 0.18) { dx = jx; dy = jy; spd = Math.min(1, jl); }
+  }
+  const sleeping = ms && ms[16];
+  if (sleeping) {
+    wakeT -= dt;
+    if ((dx || dy) && wakeT <= 0) { socket.emit('wake'); wakeT = 0.5; }
+  } else if (!dead) {
     if (dx || dy) {
       const len = Math.hypot(dx, dy), ox = me.x, oy = me.y;
-      me.x += dx / len * D.PLAYER_SPEED * dt; me.y += dy / len * D.PLAYER_SPEED * dt;
+      me.x += dx / len * D.PLAYER_SPEED * spd * dt; me.y += dy / len * D.PLAYER_SPEED * spd * dt;
       collide(me.l, me, D.PR);
       me.phase += Math.hypot(me.x - ox, me.y - oy) * 0.35;
       if (!mouse.l) me.a = Math.atan2(dy, dx);
@@ -377,7 +459,7 @@ function update(dt) {
     if (mouse.l) me.a = Math.atan2(a.y - me.y, a.x - me.x);
   }
   sendT -= dt;
-  if (sendT <= 0) { sendT = 0.05; socket.emit('p', { x: me.x, y: me.y, a: me.a, ax: a.x, ay: a.y, l: mouse.l, s: me.s }); }
+  if (sendT <= 0) { sendT = 0.05; socket.emit('p', { x: me.x, y: me.y, a: me.a, ax: a.x, ay: a.y, l: mouse.l && !sleeping, s: me.s }); }
   if (shake > 0) shake -= dt;
 }
 
@@ -405,9 +487,11 @@ function render(dt) {
   // 落ちているアイテム
   for (const it of items.values()) {
     if (it.l !== L || !vis(it.x, it.y)) continue;
-    const bob = Math.sin(TT * 3 + it.id) * 1.5;
-    ell(ctx, it.x, it.y + 6, 7, 3, 0, 'rgba(0,0,0,.3)');
-    drawIcon(ctx, it.item === 'bag' ? 'bag' : it.item, it.x, it.y + bob, it.item === 'bag' ? 20 : 16);
+    const bob = Math.sin(TT * 3 + it.id) * 1.5, glow = .14 + Math.sin(TT * 4 + it.id) * .08;
+    circ(ctx, it.x, it.y, 13, `rgba(255,245,200,${glow})`);
+    ell(ctx, it.x, it.y + 7, 8, 3, 0, 'rgba(0,0,0,.3)');
+    drawIcon(ctx, it.item === 'bag' ? 'bag' : it.item, it.x, it.y + bob, it.item === 'bag' ? 24 : it.item === 'twig' ? 28 : 20);
+    if ((TT * 1.3 + it.id * .37) % 3 < .25) { const k = (TT * 1.3 + it.id * .37) % 3 / .25; ctx.fillStyle = `rgba(255,255,255,${1 - k})`; ctx.font = '8px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✦', it.x + 7, it.y - 7 - k * 3); }
   }
   // 掘り進捗
   if (st) for (const p of st.p) {
@@ -426,7 +510,8 @@ function render(dt) {
   for (const id in RP) {
     const p = RP[id], d = p.d;
     if (d[9] || (d[3] ? 'u' : 's') !== L || !vis(p.x, p.y, 30)) continue;
-    drawAnt(p.x, p.y, p.a, d[2], 0.7, p.phase, null, d[11]);
+    drawAnt(p.x, p.y, p.a, d[2], 0.7, d[16] ? 0 : p.phase, null, d[11]);
+    if (d[16]) zzz(p.x, p.y);
     nameTag(d[1], p.x, p.y - 18, '#fff');
     bar(p.x - 12, p.y - 15, 24, 2.5, d[7] / 100, '#2ecc71');
   }
@@ -434,9 +519,10 @@ function render(dt) {
   const ms = myState();
   if (ms && !ms[9]) {
     const s = inv[sel];
-    drawAnt(me.x, me.y, me.a, ms[2], 0.7, me.phase, s ? s.id : null, ms[11]);
+    drawAnt(me.x, me.y, me.a, ms[2], 0.7, me.phase, ms[16] ? null : s ? s.id : null, ms[11]);
+    if (ms[16]) zzz(me.x, me.y);
   }
-  drawCursor();
+  if (!touchMode || wt) drawCursor();
   // パーティクル
   for (let i = parts.length - 1; i >= 0; i--) {
     const q = parts[i]; q.life -= dt;
@@ -462,6 +548,25 @@ function render(dt) {
 function drawSurface(tx0, ty0, tx1, ty1, vis) {
   const T = D.T;
   ctx.fillStyle = PAT.ground; ctx.fillRect(tx0 * T, ty0 * T, (tx1 - tx0 + 1) * T, (ty1 - ty0 + 1) * T);
+  // 木陰（木の下には小枝や葉っぱが多い）
+  for (const t of trees) {
+    const R = t.r + 420;
+    if (!vis(t.x, t.y, R)) continue;
+    const g = ctx.createRadialGradient(t.x, t.y, t.r, t.x, t.y, R);
+    g.addColorStop(0, 'rgba(20,35,10,.38)'); g.addColorStop(.75, 'rgba(20,35,10,.22)'); g.addColorStop(1, 'rgba(20,35,10,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(t.x, t.y, R, 0, 7); ctx.fill();
+    for (let k = 0; k < 26; k++) {   // 木漏れ日
+      const a = hash(t.x, k) * 7, d = t.r + 40 + hash(k, t.y) * 340, sway = Math.sin(TT * .6 + k) * 4;
+      ell(ctx, t.x + Math.cos(a) * d + sway, t.y + Math.sin(a) * d, 14 + hash(k, k) * 16, 9 + hash(k, 1) * 8, a, 'rgba(255,240,170,.07)');
+    }
+  }
+  // 花（上を歩ける）
+  for (const d of deco) {
+    if (d.t !== 'flower' || !vis(d.x, d.y, 20)) continue;
+    const col = ['#f4f0e8', '#f2c14e', '#e88aa8', '#b8a0e8'][d.c || 0];
+    for (let k = 0; k < 5; k++) { const a = k / 5 * Math.PI * 2 + d.x; ell(ctx, d.x + Math.cos(a) * 7, d.y + Math.sin(a) * 7, 6, 4, a, col); }
+    circ(ctx, d.x, d.y, 4, '#e8a020');
+  }
   // 巣穴
   const n = D.NEST;
   const g = ctx.createRadialGradient(n.x, n.y, n.r * .3, n.x, n.y, n.r * 2.2);
@@ -490,9 +595,34 @@ function drawSurface(tx0, ty0, tx1, ty1, vis) {
     }
     if (gs === 3) circ(ctx, bx + 16 + Math.sin(TT + tx) * 2, by + 26 - 26, 2.2, '#d9c46a');
   }
+  drawTrees(vis);
+  // ゴミ・キノコ
+  for (const d of deco) {
+    if (d.t === 'flower' || !vis(d.x, d.y, d.r + 20)) continue;
+    if (d.t === 'cap') {
+      ell(ctx, d.x + 6, d.y + 8, d.r, d.r * .92, 0, 'rgba(0,0,0,.35)');
+      circ(ctx, d.x, d.y, d.r, '#c8282e');
+      for (let k = 0; k < 36; k++) { const a = k / 36 * Math.PI * 2; ln(ctx, [[d.x + Math.cos(a) * (d.r - 6), d.y + Math.sin(a) * (d.r - 6)], [d.x + Math.cos(a) * d.r, d.y + Math.sin(a) * d.r]], '#8e1a1e', 2); }
+      circ(ctx, d.x, d.y, d.r - 9, '#e0353b'); ell(ctx, d.x - 12, d.y - 14, 14, 7, -.6, 'rgba(255,255,255,.25)');
+    } else if (d.t === 'can') {
+      ell(ctx, d.x + 8, d.y + 10, d.r, d.r * .92, 0, 'rgba(0,0,0,.35)');
+      const g = ctx.createRadialGradient(d.x - d.r * .3, d.y - d.r * .3, 4, d.x, d.y, d.r);
+      g.addColorStop(0, '#f2f4f6'); g.addColorStop(.7, '#aab0b8'); g.addColorStop(1, '#6a7078');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#7a8088'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(d.x, d.y, d.r - 7, 0, 7); ctx.stroke();
+      ctx.fillStyle = '#8a9098'; ctx.beginPath(); ctx.ellipse(d.x + 14, d.y - 8, 16, 9, .4, 0, 7); ctx.fill();
+      ctx.fillStyle = '#c8ccd2'; ctx.beginPath(); ctx.ellipse(d.x - 6, d.y + 2, 9, 5, .4, 0, 7); ctx.fill();
+    } else if (d.t === 'mush') {
+      ell(ctx, d.x + 6, d.y + 8, d.r, d.r * .9, 0, 'rgba(0,0,0,.35)');
+      const g = ctx.createRadialGradient(d.x - 8, d.y - 8, 2, d.x, d.y, d.r);
+      g.addColorStop(0, '#d8885a'); g.addColorStop(1, '#8a4022');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, 7); ctx.fill();
+      for (let k = 0; k < 6; k++) circ(ctx, d.x + (hash(d.x, k) - .5) * d.r * 1.3, d.y + (hash(k, d.y) - .5) * d.r * 1.3, 3 + hash(k, 2) * 3, 'rgba(250,240,220,.85)');
+    }
+  }
   // 岩
   for (const o of rocks) {
-    if (!vis(o.x, o.y, o.r)) continue;
+    if (o.k || !vis(o.x, o.y, o.r)) continue;
     ell(ctx, o.x + 5, o.y + 7, o.r, o.r * .9, 0, 'rgba(0,0,0,.35)');
     const gr = ctx.createRadialGradient(o.x - o.r * .35, o.y - o.r * .4, o.r * .1, o.x, o.y, o.r);
     gr.addColorStop(0, '#a9a49a'); gr.addColorStop(.7, '#6f6a62'); gr.addColorStop(1, '#4a4640');
@@ -502,6 +632,30 @@ function drawSurface(tx0, ty0, tx1, ty1, vis) {
   }
 }
 
+function drawTrees(vis) {
+  for (const t of trees) {
+    if (!vis(t.x, t.y, 520)) continue;
+    for (const pts of t.roots) {       // 根っこ（影→本体→ハイライト）
+      for (let pass = 0; pass < 3; pass++) {
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [x1, y1, w1] = pts[i], [x2, y2] = pts[i + 1];
+          if (pass === 0) ln(ctx, [[x1 + 6, y1 + 8], [x2 + 6, y2 + 8]], 'rgba(0,0,0,.35)', w1);
+          if (pass === 1) ln(ctx, [[x1, y1], [x2, y2]], '#4a311b', w1);
+          if (pass === 2) { ln(ctx, [[x1 - w1 * .12, y1 - w1 * .18], [x2 - w1 * .12, y2 - w1 * .18]], '#6b4a2b', w1 * .45); ln(ctx, [[x1, y1 + w1 * .15], [x2, y2 + w1 * .15]], 'rgba(30,18,8,.6)', 1.5); }
+        }
+      }
+    }
+    ell(ctx, t.x + 12, t.y + 16, t.r, t.r * .95, 0, 'rgba(0,0,0,.4)');
+    const g = ctx.createRadialGradient(t.x - t.r * .3, t.y - t.r * .35, t.r * .1, t.x, t.y, t.r);
+    g.addColorStop(0, '#6a4a2c'); g.addColorStop(.7, '#4a311b'); g.addColorStop(1, '#2e1d0f');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, 7); ctx.fill();
+    for (let k = 0; k < 22; k++) {     // 樹皮のスジ
+      const a = k / 22 * Math.PI * 2 + hash(t.x, k) * .2;
+      ln(ctx, [[t.x + Math.cos(a) * t.r * .35, t.y + Math.sin(a) * t.r * .35], [t.x + Math.cos(a + .08) * t.r * .97, t.y + Math.sin(a + .08) * t.r * .97]], 'rgba(20,12,5,.55)', 2);
+    }
+    for (let k = 0; k < 5; k++) ell(ctx, t.x + (hash(k, t.x) - .5) * t.r, t.y + (hash(t.y, k) - .5) * t.r, 12, 8, k, 'rgba(90,130,50,.45)');   // コケ
+  }
+}
 function drawUnder(tx0, ty0, tx1, ty1) {
   const T = D.T, W = D.UW;
   ctx.fillStyle = PAT.floor; ctx.fillRect(tx0 * T, ty0 * T, (tx1 - tx0 + 1) * T, (ty1 - ty0 + 1) * T);
@@ -521,6 +675,7 @@ function drawUnder(tx0, ty0, tx1, ty1) {
     if (v === 3) ln(ctx, [[x, y + 8 + hash(tx, ty) * 10], [x + 12, y + 14], [x + 20, y + 10 + hash(ty, tx) * 10], [x + T, y + 18]], '#3e2812', 3);
     if (v === 4) { for (let k = 0; k < 2; k++) { const mx = x + 8 + k * 14, my = y + 12 + hash(tx + k, ty) * 10; ctx.fillStyle = '#e8e0c8'; ctx.fillRect(mx - 1, my, 2, 5); ell(ctx, mx, my, 5, 3, 0, '#5ef0d0'); } }
     if (v === 6) { for (let k = 0; k < 3; k++) ell(ctx, x + 6 + hash(tx, k) * 20, y + 6 + hash(k, ty) * 20, 4, 3, 0, '#7d6f62'); }
+    if (v === 8) { for (let k = 0; k < 3; k++) ln(ctx, [[x + 3 + k * 10, y], [x + 6 + k * 10 + hash(tx, k) * 4, y + 16], [x + 3 + k * 10, y + T]], '#1f1309', 2); ln(ctx, [[x + 8, y + 4], [x + 9, y + 28]], 'rgba(255,220,170,.08)', 3); }
     // 壁の厚み（下・右が空間なら影）
     const below = ty + 1 < D.UH ? under[i + W] : 1;
     if (!isNatSolid(below)) { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(x, y + T - 6, T, 6); ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(x, y + T, T, 5); }
@@ -551,7 +706,28 @@ function drawCrackLines(x, y, p, col) {
 }
 function drawObj(o, tx, ty) {
   const T = D.T, x = tx * T + 16, y = ty * T + 16;
-  if (o.t === 'sugarNode') {
+  if (o.t === 'branch') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(o.a || 0);
+    ln(ctx, [[-50, 6], [52, 4]], 'rgba(0,0,0,.3)', 12);
+    ln(ctx, [[-50, 0], [-10, -2], [50, 0]], '#6b4524', 11); ln(ctx, [[-50, -2], [-10, -4], [50, -2]], '#8a5c32', 4);
+    ln(ctx, [[-14, -2], [6, -22], [12, -30]], '#6b4524', 6); ln(ctx, [[20, 0], [34, 18]], '#6b4524', 5);
+    ell(ctx, 14, -32, 9, 5, -.6, '#5a8a32'); ell(ctx, 38, 22, 8, 4, .5, '#6a9a3a');
+    for (let k = 0; k < 5; k++) ln(ctx, [[-44 + k * 18, -3], [-38 + k * 18, 3]], '#4a2e14', 1.2);
+    ctx.restore();
+  } else if (o.t === 'bigLeaf') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(o.a || 0);
+    ell(ctx, 3, 5, 54, 24, 0, 'rgba(0,0,0,.25)');
+    ell(ctx, 0, 0, 54, 24, 0, (o.a * 10 | 0) % 2 ? '#b8862e' : '#7a9a2e'); ell(ctx, -6, -4, 40, 14, 0, 'rgba(255,255,200,.12)');
+    ln(ctx, [[-56, 0], [54, 0]], 'rgba(60,40,10,.7)', 2.5);
+    for (let k = -3; k <= 3; k++) { ln(ctx, [[k * 13, 0], [k * 13 + 12, -18]], 'rgba(60,40,10,.45)', 1.2); ln(ctx, [[k * 13, 0], [k * 13 + 12, 18]], 'rgba(60,40,10,.45)', 1.2); }
+    ln(ctx, [[-56, 0], [-70, 4]], '#5a3a14', 3);
+    ctx.restore();
+  } else if (o.t === 'husk') {
+    ell(ctx, x + 2, y + 5, 18, 12, 0, 'rgba(0,0,0,.35)');
+    for (let k = -1; k <= 1; k++) for (const sd of [-1, 1]) ln(ctx, [[x + k * 7, y + sd * 6], [x + k * 9 + 3, y + sd * 13], [x + k * 6, y + sd * 15]], '#2a2a22', 2);
+    ell(ctx, x, y, 17, 12, 0, '#3a4a32'); ell(ctx, x - 4, y - 4, 8, 4, -.3, 'rgba(255,255,255,.15)'); ln(ctx, [[x - 17, y], [x + 12, y]], '#1a2216', 1.5);
+    ell(ctx, x + 15, y, 6, 6, 0, '#2a3324');
+  } else if (o.t === 'sugarNode') {
     ell(ctx, x + 3, y + 10, 18, 7, 0, 'rgba(0,0,0,.3)');
     ctx.fillStyle = '#d9d9cf'; ctx.fillRect(x - 17, y - 10, 34, 24);
     ctx.fillStyle = '#fbfbf4'; ctx.fillRect(x - 17, y - 20, 34, 12);
@@ -562,6 +738,10 @@ function drawObj(o, tx, ty) {
   }
   const max = D.OBJ[o.t].hp;
   if (o.hp < max) bar(x - 12, y - 19, 24, 3, o.hp / max, '#e2a35c');
+}
+function zzz(x, y) {
+  ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+  for (let k = 0; k < 3; k++) { const t = (TT * .7 + k / 3) % 1; ctx.fillStyle = `rgba(200,220,255,${1 - t})`; ctx.fillText('z', x + 8 + t * 10, y - 10 - t * 18); }
 }
 function bar(x, y, w, h, v, col) {
   ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
@@ -646,7 +826,7 @@ function rebuildMinimap() {
   const g = mm.getContext('2d'), img = g.createImageData(D.UW, D.UH);
   for (let i = 0; i < under.length; i++) {
     const v = under[i], o = i * 4;
-    const c = v === 0 ? [190, 160, 110] : v === 7 ? [255, 230, 140] : v === 6 ? [110, 60, 50] : v === 5 ? [40, 40, 45] : [70, 50, 32];
+    const c = v === 0 ? [190, 160, 110] : v === 7 ? [255, 230, 140] : v === 6 ? [110, 60, 50] : v === 5 ? [40, 40, 45] : v === 8 ? [35, 22, 12] : [70, 50, 32];
     img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
   }
   g.putImageData(img, 0, 0);
@@ -690,7 +870,10 @@ function drawHUD(dt, ms) {
     ctx.fillStyle = '#8a8478'; for (const o of rocks) { ctx.beginPath(); ctx.arc(mx + o.x * s, my + o.y * s, Math.max(1, o.r * s), 0, 7); ctx.fill(); }
     ctx.strokeStyle = 'rgba(255,255,255,.12)';
     for (const r of [30, 62]) { ctx.beginPath(); ctx.arc(mx + D.NEST.x * s, my + D.NEST.y * s, r * D.T * s, 0, 7); ctx.stroke(); }
+    for (const t of trees) { circ(ctx, mx + t.x * s, my + t.y * s, 22 * 1.0, 'rgba(30,60,20,.45)'); circ(ctx, mx + t.x * s, my + t.y * s, 3.5, '#3a2a16'); }
+    for (const d of deco) if (d.t !== 'flower') circ(ctx, mx + d.x * s, my + d.y * s, 2, d.t === 'cap' ? '#d33' : d.t === 'can' ? '#ccd' : '#a65');
     for (const d of dens) circ(ctx, mx + d.x * s, my + d.y * s, 2.5, '#300');
+    for (const [i, o] of objs.s) if (o.t === 'branch') { ctx.fillStyle = '#e0a050'; ctx.fillRect(mx + (i % D.SW) * D.T * s - 1, my + (i / D.SW | 0) * D.T * s - 1, 2.5, 2.5); }
     for (const [i, o] of objs.s) if (o.t === 'sugarNode') { ctx.fillStyle = '#fff'; ctx.fillRect(mx + (i % D.SW) * D.T * s - 1, my + (i / D.SW | 0) * D.T * s - 1, 2.5, 2.5); }
     circ(ctx, mx + D.NEST.x * s, my + D.NEST.y * s, 4, '#f5d48a');
     for (const id in RE) if (!RE[id].d[2]) circ(ctx, mx + RE[id].x * s, my + RE[id].y * s, 1.5, '#ff4b3a');
@@ -713,7 +896,7 @@ function drawHUD(dt, ms) {
   }
 
   // ホットバー
-  const sz = 54, gap = 6, hbW = 8 * sz + 7 * gap, hx = VW / 2 - hbW / 2, hy = VH - sz - 16;
+  const HL = hotbarLayout(), sz = HL.sz, gap = HL.gap, hx = HL.x, hy = HL.y;
   for (let i = 0; i < 8; i++) {
     const x = hx + i * (sz + gap), s = inv[i];
     ctx.fillStyle = 'rgba(20,14,8,.8)'; ctx.fillRect(x, hy, sz, sz);
@@ -728,7 +911,7 @@ function drawHUD(dt, ms) {
   ctx.textAlign = 'center'; ctx.font = 'bold 14px sans-serif';
   if (cur) {
     const def = D.ITEMS[cur.id];
-    const hint = def.food ? `（右クリック/E で食べる +${def.food}）` : def.place ? '（右クリックで置く）' : def.jaw ? '（持っているだけで効果）' : def.armor ? '（持っているだけで効果）' : '';
+    const hint = def.food ? (touchMode ? `（「食べる」ボタンで +${def.food}）` : `（右クリック/E で食べる +${def.food}）`) : def.place ? (touchMode ? '（置きたい場所をタップ）' : '（右クリックで置く）') : def.jaw || def.armor ? '（持っているだけで効果）' : '';
     ctx.fillStyle = '#000'; ctx.fillText(def.n + hint, VW / 2 + 1, hy - 9); ctx.fillStyle = '#f0d9a8'; ctx.fillText(def.n + hint, VW / 2, hy - 10);
   }
   // 状況ヒント
@@ -737,7 +920,9 @@ function drawHUD(dt, ms) {
     if (me.l === 's' && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30) tip = 'F：巣に入る';
     if (me.l === 'u' && Math.hypot(me.x - (D.UENT.tx + .5) * D.T, me.y - (D.UENT.ty + .5) * D.T) < D.T * 1.3) tip = 'F：地上に出る';
     const a = aim(), o = objs[me.l].get(Math.floor(a.y / D.T) * LW(me.l) + Math.floor(a.x / D.T));
-    if (o && Math.hypot(a.x - me.x, a.y - me.y) < D.REACH) tip = o.t === 'chest' ? '右クリック：チェストを開く' : o.t === 'bench' ? '右クリック：作業台でクラフト' : o.t === 'sugarNode' ? '左クリック長押し：角砂糖を削る' : tip;
+    const R = touchMode ? 'タップ' : '右クリック', H = touchMode ? '長押し' : '左クリック長押し';
+    const TIPS = { chest: `${R}：チェストを開く`, bench: `${R}：作業台でクラフト`, bed: `${R}：${st && st.c[2] ? '眠る' : '復活地点にする（夜は眠れる）'}`, sugarNode: `${H}：角砂糖を削る`, branch: `${H}：枝をかじって小枝を集める`, bigLeaf: `${H}：落ち葉をちぎって葉っぱを集める`, husk: `${H}：虫の亡骸から甲殻を取る` };
+    if (o && Math.hypot(a.x - me.x, a.y - me.y) < D.REACH && TIPS[o.t]) tip = TIPS[o.t];
     if (me.l === 'u' && cracks.size) {
       for (const [i] of cracks) { const tx = i % D.UW, ty = (i / D.UW) | 0; if (Math.hypot((tx + .5) * D.T - me.x, (ty + .5) * D.T - me.y) < 200) { tip = '⚠ 天井が崩れそう！柱を置くか離れろ！'; break; } }
     }
@@ -747,8 +932,17 @@ function drawHUD(dt, ms) {
     ctx.fillStyle = tip.startsWith('⚠') ? 'rgba(120,20,10,.75)' : 'rgba(0,0,0,.6)'; ctx.fillRect(VW / 2 - w / 2, hy - 62, w, 28);
     ctx.fillStyle = '#ffe9a8'; ctx.fillText(tip, VW / 2, hy - 43);
   }
-  ctx.textAlign = 'left'; ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,.45)';
-  ctx.fillText('Tab 持ち物　C クラフト　E 食べる　F 出入り　Q 捨てる', 12, VH - 12);
+  if (!touchMode) {
+    ctx.textAlign = 'left'; ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.fillText('Tab 持ち物　C クラフト　E 食べる　F 出入り　Q 捨てる', 12, VH - 12);
+  } else drawTouchUI();
+  // 睡眠
+  if (ms && ms[16]) {
+    ctx.fillStyle = st.c[4] ? 'rgba(10,15,40,.45)' : 'rgba(10,15,40,.25)'; ctx.fillRect(0, 0, VW, VH);
+    ctx.textAlign = 'center'; ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = '#c8d4ff';
+    ctx.fillText(st.c[4] ? '💤 全員が眠っている… 夜が早く過ぎていく' : '💤 眠っている…（仲間が全員眠ると夜が早く過ぎる）', VW / 2, VH / 2 - 60);
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#aab'; ctx.fillText(touchMode ? 'スティックを動かすと起きる' : '移動キーで起きる', VW / 2, VH / 2 - 34);
+  }
 
   // メッセージ
   ctx.textAlign = 'center'; ctx.font = 'bold 15px sans-serif';
@@ -780,6 +974,25 @@ function drawHUD(dt, ms) {
   }
 }
 
+function drawTouchUI() {
+  // スティック
+  const bx = joy ? joy.ox : 110, by = joy ? joy.oy : VH - 150;
+  circ(ctx, bx, by, 55, joy ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.06)');
+  ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(bx, by, 55, 0, 7); ctx.stroke();
+  if (joy) {
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, l = Math.hypot(dx, dy), k = l > 55 ? 55 / l : 1;
+    circ(ctx, bx + dx * k, by + dy * k, 24, 'rgba(255,240,210,.55)');
+  } else { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('移動', bx, by + 4); }
+  // ボタン
+  for (const b of touchButtons()) {
+    const dim = b.id === 'enter' && !b.on;
+    circ(ctx, b.x, b.y, b.r, dim ? 'rgba(30,22,14,.45)' : b.id === 'enter' ? 'rgba(200,150,60,.85)' : 'rgba(30,22,14,.8)');
+    ctx.strokeStyle = dim ? 'rgba(255,255,255,.15)' : '#d7b77a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.stroke();
+    ctx.fillStyle = dim ? 'rgba(255,255,255,.3)' : '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(b.label, b.x, b.y + 4);
+  }
+  if (TT < 25) { ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('画面タップ：置く・開く・食べる　長押し：掘る・攻撃', VW / 2, VH - 220); }
+}
+
 // ================= パネル（持ち物・クラフト・チェスト） =================
 function openPanel(kind) { panel = kind; held = -1; $('panel').classList.remove('hidden'); renderPanel(); }
 function closePanel() { panel = null; chest = null; held = -1; $('panel').classList.add('hidden'); }
@@ -796,8 +1009,8 @@ function renderPanel() {
   const body = $('pbody');
   if (panel === 'inv') {
     $('ptitle').innerHTML = '持ち物 <small>Tab / Esc で閉じる</small>';
-    body.innerHTML = '<h3>上の段がホットバー（1〜8）</h3>' + invGrid('inv');
-    $('phint').textContent = 'クリックでつかむ → 別の枠をクリックで入れ替え ／ 右クリックで地面に捨てる';
+    body.innerHTML = '<h3>上の段がホットバー（1〜8）</h3>' + invGrid('inv') + (held >= 0 ? '<button id="dropBtn">つかんだ物を捨てる</button>' : '');
+    $('phint').textContent = 'タップ/クリックでつかむ → 別の枠で入れ替え ／ 右クリックでも捨てられる';
   } else if (panel === 'craft') {
     $('ptitle').innerHTML = 'クラフト <small>C / Esc で閉じる</small>';
     const near = nearBenchC();
@@ -830,6 +1043,7 @@ function nearBenchC() {
   return false;
 }
 $('pbody').addEventListener('click', e => {
+  if (e.target.id === 'dropBtn') { socket.emit('drop', held); held = -1; renderPanel(); return; }
   const b = e.target.closest('[data-craft]');
   if (b) { socket.emit('craft', +b.dataset.craft); return; }
   const s = e.target.closest('.slot');
