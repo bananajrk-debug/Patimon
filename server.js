@@ -31,13 +31,14 @@ const SAVE_DIR = path.join(__dirname, 'saves');
 const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#e67e22', '#1abc9c', '#f1c40f', '#ecf0f1', '#e84393'];
 
 // 地下タイル
-const U = { OPEN: 0, DIRT: 1, CLAY: 2, ROOT: 3, GLOW: 4, HARD: 5, RUBBLE: 6, ENT: 7 };
-const isNatSolid = v => v >= 1 && v <= 6;
+const U = { OPEN: 0, DIRT: 1, CLAY: 2, ROOT: 3, GLOW: 4, HARD: 5, RUBBLE: 6, ENT: 7, BIGROOT: 8 };
+const isNatSolid = v => (v >= 1 && v <= 6) || v === 8;
 const TILE_INFO = {
   1: { h: 10, drop: [['dirt', 1]] },
-  2: { h: 25, jaw: 2, drop: [['clay', 1]] },
+  2: { h: 25, jaw: 2, need: '粘土を掘るには「小石の大あご」が必要', drop: [['clay', 1]] },
   3: { h: 15, drop: [['root', 1], ['dirt', 1]] },
   4: { h: 6, drop: [['glow', 1]] },
+  8: { h: 40, jaw: 3, need: '巨大な根をかじるには「甲殻の大あご」が必要', drop: [['root', 3]] },
 };
 
 const ITEMS = {
@@ -50,6 +51,7 @@ const ITEMS = {
   barricade: { n: '土のバリケード', place: 'barricade' }, clayWall: { n: '粘土の壁', place: 'clayWall' },
   pillarD: { n: '土の柱', place: 'pillarD' }, pillarR: { n: '根っこの柱', place: 'pillarR' },
   lamp: { n: 'キノコランプ', place: 'lamp' }, spike: { n: 'トゲ罠', place: 'spike' }, net: { n: '糸のネット', place: 'net' },
+  bed: { n: '葉っぱのベッド', place: 'bed' },
   jaw2: { n: '小石の大あご', jaw: 2, stack: 1 }, jaw3: { n: '甲殻の大あご', jaw: 3, stack: 1 },
   armor1: { n: '葉のマント', armor: 0.15, stack: 1 }, armor2: { n: '甲殻アーマー', armor: 0.4, stack: 1 },
 };
@@ -59,10 +61,16 @@ const OBJ = {
   barricade: { solid: 1, hp: 60 }, clayWall: { solid: 1, hp: 180 },
   pillarD: { solid: 1, hp: 50, support: 3 }, pillarR: { solid: 1, hp: 90, support: 5 },
   lamp: { solid: 0, hp: 10, light: 1 }, spike: { solid: 0, hp: 40 }, net: { solid: 0, hp: 30 },
-  sugarNode: { solid: 1, hp: 30, natural: 1 },
+  bed: { solid: 0, hp: 30 },
+  // 自然にあるもの（壊すと素材が出る）
+  sugarNode: { solid: 1, hp: 30, natural: 1, drop: [['sugar', 4]] },
+  branch: { solid: 1, hp: 36, natural: 1, drop: [['twig', 5]] },        // 落ちた枝
+  bigLeaf: { solid: 0, hp: 12, natural: 1, drop: [['leaf', 4]] },       // 大きな落ち葉
+  husk: { solid: 1, hp: 30, natural: 1, drop: [['shell', 2], ['meat', 1]] }, // 虫の亡骸（地下の空洞）
 };
 const RECIPES = [
   { out: 'bench', n: 1, cost: { twig: 4, leaf: 2 } },
+  { out: 'bed', n: 1, cost: { leaf: 5, grass: 3 } },
   { out: 'chest', n: 1, cost: { leaf: 3, twig: 2 } },
   { out: 'barricade', n: 1, cost: { dirt: 4 } },
   { out: 'pillarD', n: 1, cost: { dirt: 3 } },
@@ -153,18 +161,98 @@ function genUnder(seed) {
       a += rand(-0.6, 0.6); x = clamp(x + Math.cos(a), 3, UW - 4); y = clamp(y + Math.sin(a), 3, UH - 4);
     }
   }
+  for (let v = 0; v < 7; v++) {            // 巨大な木の根（太くて長い）
+    let x = randi(6, UW - 7), y = randi(6, UH - 7), a = rand(0, 6.28);
+    if (Math.hypot(x - UCX, y - UCY) < 14) continue;
+    const len = randi(30, 60);
+    for (let k = 0; k < len; k++) {
+      for (let oy = 0; oy < 2; oy++) for (let ox = 0; ox < 2; ox++) {
+        const tx = Math.round(x) + ox, ty = Math.round(y) + oy;
+        if (tx < 2 || ty < 2 || tx >= UW - 2 || ty >= UH - 2 || Math.hypot(tx - UCX, ty - UCY) < 9) continue;
+        g[ty * UW + tx] = U.BIGROOT;
+      }
+      a += rand(-0.25, 0.25); x = clamp(x + Math.cos(a), 3, UW - 5); y = clamp(y + Math.sin(a), 3, UH - 5);
+    }
+  }
   for (let ty = UCY - 2; ty < UCY + 2; ty++) for (let tx = UCX - 2; tx < UCX + 2; tx++) g[ty * UW + tx] = U.OPEN;
   g[UENT.ty * UW + UENT.tx] = U.ENT;
   return g;
+}
+// 地下の小さな空洞（虫の亡骸が眠っている）
+function genCaverns(w) {
+  let made = 0;
+  for (let k = 0; k < 300 && made < 10; k++) {
+    const cw = randi(3, 4), ch = 3, x0 = randi(4, UW - 8), y0 = randi(4, UH - 7);
+    if (Math.hypot(x0 - UCX, y0 - UCY) < 14) continue;
+    let ok = true;
+    for (let y = y0 - 1; y <= y0 + ch && ok; y++) for (let x = x0 - 1; x <= x0 + cw; x++) {
+      const v = w.under[y * UW + x];
+      if (v !== U.DIRT && v !== U.CLAY && v !== U.ROOT) { ok = false; break; }
+    }
+    if (!ok) continue;
+    for (let y = y0; y < y0 + ch; y++) for (let x = x0; x < x0 + cw; x++) w.under[y * UW + x] = U.OPEN;
+    w.objs.u.set((y0 + 1) * UW + x0 + randi(0, cw - 1), { t: 'husk', hp: OBJ.husk.hp });
+    for (let j = 0; j < 3; j++) { const gx = x0 - 1 + randi(0, cw + 1), gy = y0 - 1; if (w.under[gy * UW + gx] === U.DIRT) w.under[gy * UW + gx] = U.GLOW; }
+    made++;
+  }
 }
 
 function inRock(w, x, y, pad) {
   for (const o of w.rocks) if (Math.hypot(o.x - x, o.y - y) < o.r + pad) return true;
   return false;
 }
+function genTrees(w) {
+  // 巨木：幹＋放射状に伸びる根っこ。木の周りには小枝や葉っぱが落ちる
+  const want = 8;
+  for (let k = 0; k < 600 && w.trees.length < want; k++) {
+    let x, y;
+    if (w.trees.length === 0) {            // 1本目は巣の近くに必ず置く
+      const a = rand(0, 6.28), d = rand(16, 22) * T;
+      x = NEST.x + Math.cos(a) * d; y = NEST.y + Math.sin(a) * d;
+    } else { x = rand(500, SW * T - 500); y = rand(500, SH * T - 500); }
+    if (Math.hypot(x - NEST.x, y - NEST.y) < 420) continue;
+    if (w.trees.some(t => Math.hypot(t.x - x, t.y - y) < 1100)) continue;
+    const r = rand(75, 105), tree = { x: Math.round(x), y: Math.round(y), r: Math.round(r), roots: [] };
+    const n = randi(5, 7), base = rand(0, 6.28);
+    for (let i = 0; i < n; i++) {
+      let a = base + i / n * Math.PI * 2 + rand(-0.3, 0.3), px = x + Math.cos(a) * r * 0.8, py = y + Math.sin(a) * r * 0.8;
+      const len = randi(8, 14), pts = [];
+      let wdt = rand(30, 40);
+      for (let s = 0; s < len; s++) {
+        pts.push([Math.round(px), Math.round(py), Math.round(wdt)]);
+        a += rand(-0.25, 0.25); px += Math.cos(a) * 30; py += Math.sin(a) * 30; wdt = Math.max(10, wdt - rand(1.5, 3));
+        if (Math.hypot(px - NEST.x, py - NEST.y) < 150) break;
+      }
+      tree.roots.push(pts);
+      for (const [cx, cy, cw] of pts) w.rocks.push({ x: cx, y: cy, r: Math.round(cw / 2), k: 'c' });
+    }
+    w.rocks.push({ x: tree.x, y: tree.y, r: tree.r, k: 'c' });
+    w.trees.push(tree);
+  }
+}
+function genDeco(w) {
+  const place = (t, r, n, solid) => {
+    for (let k = 0, made = 0; k < 400 && made < n; k++) {
+      const x = rand(200, SW * T - 200), y = rand(200, SH * T - 200);
+      if (Math.hypot(x - NEST.x, y - NEST.y) < 360 || inRock(w, x, y, r + 40)) continue;
+      w.deco.push({ t, x: Math.round(x), y: Math.round(y), r });
+      if (solid) w.rocks.push({ x: Math.round(x), y: Math.round(y), r, k: 'c' });
+      made++;
+    }
+  };
+  place('cap', 44, 4, true);       // ペットボトルのキャップ
+  place('can', 70, 2, true);       // 空き缶（横倒し）
+  place('mush', 30, 14, true);     // 大きなキノコ
+  for (let k = 0; k < 90; k++) {   // 花（上を歩ける）
+    const x = rand(80, SW * T - 80), y = rand(80, SH * T - 80);
+    if (!inRock(w, x, y, 20)) w.deco.push({ t: 'flower', x: Math.round(x), y: Math.round(y), r: 0, c: randi(0, 3) });
+  }
+}
 function genSurface(w) {
+  genTrees(w);
+  genDeco(w);
   let tries = 0;
-  while (w.rocks.length < 160 && tries++ < 4000) {
+  while (w.rocks.filter(o => !o.k).length < 140 && tries++ < 4000) {
     const r = rand(18, 64), x = rand(r, SW * T - r), y = rand(r, SH * T - r);
     if (Math.hypot(x - NEST.x, y - NEST.y) < 260) continue;
     if (w.rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 40)) continue;
@@ -200,23 +288,43 @@ function randomSurfacePoint(w, z) {
   }
   return null;
 }
+// 木の下のランダムな地点
+function pointNearTree(w, z) {
+  const trees = w.trees.filter(t => z === 0 || zoneOf(t.x, t.y) === z);
+  if (!trees.length) return null;
+  for (let k = 0; k < 30; k++) {
+    const t = trees[randi(0, trees.length - 1)], a = rand(0, 6.28), d = t.r + rand(30, 330);
+    const x = t.x + Math.cos(a) * d, y = t.y + Math.sin(a) * d;
+    if (x < 2 * T || y < 2 * T || x > SW * T - 2 * T || y > SH * T - 2 * T) continue;
+    if (inRock(w, x, y, 14) || w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+  return null;
+}
 function spawnRes(w, r) {
-  const pt = randomSurfacePoint(w, r.z);
+  let pt = null;
+  if ((r.item === 'twig' || r.item === 'leaf') && Math.random() < 0.8) pt = pointNearTree(w, r.z);   // 小枝・葉っぱは木の下に多い
+  if (!pt) pt = randomSurfacePoint(w, r.z);
   if (!pt) return;
   const key = r.z + ':' + r.item;
   w.resCount[key] = (w.resCount[key] || 0) + 1;
   addGroundItem(w, { layer: 's', x: pt.x, y: pt.y, item: r.item, n: 1, res: key });
 }
-function spawnSugarNodes(w) {
-  let have = 0;
-  for (const o of w.objs.s.values()) if (o.t === 'sugarNode') have++;
-  for (let k = 0; k < 200 && have < SUGAR_NODES; k++) {
-    const pt = randomSurfacePoint(w, 3);
-    if (!pt) continue;
-    const idx = Math.floor(pt.y / T) * SW + Math.floor(pt.x / T);
-    if (w.objs.s.has(idx)) continue;
-    setObj(w, 's', idx, { t: 'sugarNode', hp: OBJ.sugarNode.hp });
-    have++;
+// 角砂糖・落ちた枝・大きな落ち葉を補充（朝ごと）
+function spawnNodes(w) {
+  const want = { sugarNode: SUGAR_NODES, branch: w.trees.length * 2 + 4, bigLeaf: w.trees.length * 3 };
+  const have = { sugarNode: 0, branch: 0, bigLeaf: 0 };
+  for (const o of w.objs.s.values()) if (o.t in have) have[o.t]++;
+  for (const t in want) {
+    for (let k = 0; k < 200 && have[t] < want[t]; k++) {
+      const pt = t === 'sugarNode' ? randomSurfacePoint(w, 3) : (Math.random() < 0.85 ? pointNearTree(w, 0) : randomSurfacePoint(w, randi(1, 3)));
+      if (!pt) continue;
+      const tx = Math.floor(pt.x / T), ty = Math.floor(pt.y / T), idx = ty * SW + tx;
+      if (w.objs.s.has(idx) || Math.hypot(pt.x - NEST.x, pt.y - NEST.y) < 150) continue;
+      if (OBJ[t].solid && inRock(w, (tx + 0.5) * T, (ty + 0.5) * T, 18)) continue;
+      setObj(w, 's', idx, { t, hp: OBJ[t].hp, a: +rand(0, 6.28).toFixed(2) });
+      have[t]++;
+    }
   }
 }
 
@@ -226,15 +334,16 @@ function createWorld(code) {
   w.seed = seed;
   genSurface(w);
   w.under = genUnder(seed);
+  genCaverns(w);
   for (const r of RES) for (let k = 0; k < r.n; k++) spawnRes(w, r);
-  spawnSugarNodes(w);
+  spawnNodes(w);
   recomputeSupport(w);
   return w;
 }
 function baseWorld(code) {
   return {
     code, seed: 0, day: 1, time: 0, isNight: false, rain: 0,
-    rocks: [], dens: [], grass: new Map(), under: null, objs: { s: new Map(), u: new Map() },
+    rocks: [], dens: [], trees: [], deco: [], grass: new Map(), under: null, objs: { s: new Map(), u: new Map() },
     items: new Map(), resCount: {}, saved: {}, players: {}, enemies: [], cracks: new Map(),
     nextId: 1, tileQ: [], grassQ: [], objQ: new Map(), gameOver: false,
     flowP: null, flowE: null, flowT: 0, secT: 1, saveT: 0, tickN: 0, saving: false,
@@ -269,15 +378,15 @@ async function dbDelete(code) {
   if (fs.existsSync(f)) fs.unlinkSync(f);
 }
 function playerSave(p) {
-  if (p.dead) return { inv: new Array(INV_SIZE).fill(null), hp: 100, hunger: 70, layer: 'u', x: UCX * T, y: UCY * T };
-  return { inv: p.inv, hp: p.hp, hunger: p.hunger, layer: p.layer, x: p.x, y: p.y };
+  if (p.dead) return { inv: new Array(INV_SIZE).fill(null), hp: 100, hunger: 70, layer: 'u', x: UCX * T, y: UCY * T, bed: p.bed, respawnAtBed: 1 };
+  return { inv: p.inv, hp: p.hp, hunger: p.hunger, layer: p.layer, x: p.x, y: p.y, bed: p.bed };
 }
 function serialize(w) {
   for (const p of Object.values(w.players)) w.saved[p.name] = playerSave(p);
   const items = [...w.items.values()].map(({ id, ...rest }) => rest).filter(i => !i.noPickUntil || true);
   return {
     v: 1, seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId,
-    rocks: w.rocks, dens: w.dens, grass: [...w.grass],
+    rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
     objs: { s: [...w.objs.s], u: [...w.objs.u] },
     items, saved: w.saved,
@@ -285,7 +394,7 @@ function serialize(w) {
 }
 function deserialize(code, d) {
   const w = baseWorld(code);
-  Object.assign(w, { seed: d.seed, day: d.day, time: d.time, isNight: d.isNight, nextId: d.nextId || 1, rocks: d.rocks, dens: d.dens, saved: d.saved || {} });
+  Object.assign(w, { seed: d.seed, day: d.day, time: d.time, isNight: d.isNight, nextId: d.nextId || 1, rocks: d.rocks, dens: d.dens, trees: d.trees || [], deco: d.deco || [], saved: d.saved || {} });
   w.grass = new Map(d.grass);
   w.under = new Uint8Array(Buffer.from(d.under, 'base64'));
   w.objs = { s: new Map(d.objs.s), u: new Map(d.objs.u) };
@@ -355,7 +464,7 @@ function give(w, p, id, n) {
 const emitInv = p => io.to(p.id).emit('inv', { inv: p.inv, sel: p.sel });
 function setObj(w, l, idx, o) {
   if (o) w.objs[l].set(idx, o); else w.objs[l].delete(idx);
-  w.objQ.set(l + idx, { l, i: idx, o: o ? { t: o.t, hp: Math.round(o.hp) } : null });
+  w.objQ.set(l + idx, { l, i: idx, o: o ? { t: o.t, hp: Math.round(o.hp), a: o.a || 0 } : null });
 }
 
 // ================= 衝突 =================
@@ -456,8 +565,10 @@ function makePlayer(w, id, name) {
     inv: new Array(INV_SIZE).fill(null), sel: 0, dead: false, respawn: 0,
     ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
   };
-  if (s) Object.assign(p, { inv: s.inv, hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y });
-  else addItem(p.inv, 'crumb', 5);
+  if (s) {
+    Object.assign(p, { inv: s.inv, hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y, bed: s.bed || null });
+    if (s.respawnAtBed) { const b = bedPos(w, p); if (b) Object.assign(p, { layer: b.l, x: b.x, y: b.y }); }
+  } else addItem(p.inv, 'crumb', 5);
   return p;
 }
 function teleport(p, l, x, y) {
@@ -466,16 +577,26 @@ function teleport(p, l, x, y) {
 }
 function killPlayer(w, p, why, buried) {
   if (p.dead) return;
-  p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false;
+  p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false; p.sleep = false;
   if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), p.inv);   // 持ち物をその場に落とす
   p.inv = new Array(INV_SIZE).fill(null);
   emitInv(p);
   msg(w, `💀 ${p.name}が${why}${buried ? '（持ち物は土の中に消えた）' : ''}`);
 }
+// ベッドの位置（壊されていたらnull）
+function bedPos(w, p) {
+  if (!p.bed) return null;
+  const o = w.objs[p.bed.l].get(p.bed.i);
+  if (!o || o.t !== 'bed') return null;
+  const W = LW(p.bed.l);
+  return { l: p.bed.l, x: (p.bed.i % W + 0.5) * T, y: (Math.floor(p.bed.i / W) + 0.5) * T };
+}
 function respawnPlayer(w, p) {
   p.dead = false; p.hp = 100; p.hunger = 70;
-  teleport(p, 'u', UCX * T, UCY * T);
+  const b = bedPos(w, p);
+  if (b) teleport(p, b.l, b.x, b.y); else teleport(p, 'u', UCX * T, UCY * T);
 }
+function wake(p) { if (p.sleep) { p.sleep = false; } }
 function nearBench(w, p) {
   for (const [i, o] of w.objs[p.layer]) {
     if (o.t !== 'bench') continue;
@@ -509,10 +630,10 @@ function destroyObj(w, l, idx, byPlayer) {
   setObj(w, l, idx, null);
   if (o.items) dropItems(w, l, cx, cy, o.items);
   if (byPlayer) {
-    if (o.t === 'sugarNode') give(w, byPlayer, 'sugar', 4);
+    if (OBJ[o.t].drop) for (const [id, n] of OBJ[o.t].drop) give(w, byPlayer, id, n);
     else give(w, byPlayer, o.t, 1);
     emitInv(byPlayer);
-  } else if (o.t !== 'sugarNode') msg(w, `⚠ ${ITEMS[o.t].n}が壊された！`);
+  } else if (!OBJ[o.t].natural) msg(w, `⚠ ${ITEMS[o.t].n}が壊された！`);
   if (OBJ[o.t].support) recomputeSupport(w);
 }
 function damageObj(w, l, idx, amount) {
@@ -520,7 +641,7 @@ function damageObj(w, l, idx, amount) {
   if (!o) return;
   o.hp -= amount;
   if (o.hp <= 0) destroyObj(w, l, idx, null);
-  else w.objQ.set(l + idx, { l, i: idx, o: { t: o.t, hp: Math.round(o.hp) } });
+  else w.objQ.set(l + idx, { l, i: idx, o: { t: o.t, hp: Math.round(o.hp), a: o.a || 0 } });
 }
 
 function handleHold(w, p) {
@@ -554,7 +675,7 @@ function handleHold(w, p) {
     const info = TILE_INFO[w.under[idx]];
     if (!info) { p.dig = null; return; }
     if (info.jaw && jawLv < info.jaw) {
-      if (p.warnT <= 0) { msgTo(p, '粘土を掘るには「小石の大あご」が必要'); p.warnT = 3; }
+      if (p.warnT <= 0) { msgTo(p, info.need); p.warnT = 3; }
       p.dig = null; return;
     }
     kind = 't'; hard = info.h;
@@ -588,7 +709,8 @@ function updatePlayers(w) {
   for (const p of Object.values(w.players)) {
     if (p.dead) { p.respawn -= DT; if (p.respawn <= 0) respawnPlayer(w, p); continue; }
     p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT;
-    p.hunger -= 0.28 * DT;
+    p.hunger -= (p.sleep ? 0.14 : 0.28) * DT;
+    if (p.sleep) p.hp = Math.min(100, p.hp + 4 * DT);
     if (p.hunger <= 0) { p.hunger = 0; p.hp -= 3 * DT; }
     else if (p.hunger > 50) p.hp = Math.min(100, p.hp + 1 * DT);
     // 拾う
@@ -627,6 +749,7 @@ function buildFlow(w, sources) {
       const j = ny * UW + nx;
       if (isNatSolid(w.under[j])) continue;
       const o = w.objs.u.get(j);
+      if (o && OBJ[o.t].solid && OBJ[o.t].natural) continue;
       const nv = v + (o && OBJ[o.t].solid ? 10 : 1);
       if (nv < d[j]) { d[j] = nv; push(nv, j); }
     }
@@ -684,6 +807,7 @@ function updateEnemies(w) {
       if (e.atkCd <= 0) {
         e.atkCd = 1.0;
         tgt.hp -= s.dmg * (1 - bestArmor(tgt.inv));
+        if (tgt.sleep) { wake(tgt); msgTo(tgt, '⚠ 攻撃されて目が覚めた！'); }
         if (tgt.hp <= 0) killPlayer(w, tgt, `${s.n}にやられた…`);
       }
       continue;
@@ -751,13 +875,18 @@ function updateEnemies(w) {
 // ================= 環境（昼夜・雨・草・資源・湧き） =================
 function updateEnv(w) {
   w.time += DT;
+  // 生きている全員がベッドで寝ていたら夜が早送りになる
+  const alive = Object.values(w.players).filter(p => !p.dead);
+  w.skipping = w.isNight && alive.length > 0 && alive.every(p => p.sleep);
+  if (w.skipping) w.time += DT * 11;
   if (!w.isNight && w.time >= DAY_LEN) {
     w.isNight = true; w.time = 0; w.rain = 0;
     msg(w, `🌙 ${w.day}日目の夜。モンスターが巣穴から出てくる…`);
   } else if (w.isNight && w.time >= NIGHT_LEN) {
     w.isNight = false; w.time = 0; w.day++;
     for (const e of w.enemies) if (e.raider) e.retreat = true;
-    spawnSugarNodes(w);
+    for (const p of Object.values(w.players)) wake(p);
+    spawnNodes(w);
     msg(w, `☀ ${w.day}日目の朝。モンスターが巣穴へ帰っていく`);
   }
   if (w.rain > 0) { w.rain -= DT; if (w.rain <= 0) msg(w, '雨がやんだ'); }
@@ -797,11 +926,11 @@ function broadcast(w) {
     p: Object.values(w.players).map(p => [
       p.id, p.name, p.color, p.layer === 'u' ? 1 : 0, Math.round(p.x), Math.round(p.y), +p.a.toFixed(2),
       Math.round(p.hp), Math.round(p.hunger), p.dead ? 1 : 0, Math.ceil(p.respawn), p.biteT > 0 ? 1 : 0,
-      p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, bestJaw(p.inv), bestArmor(p.inv),
+      p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, bestJaw(p.inv), bestArmor(p.inv), p.sleep ? 1 : 0,
     ]),
     e: w.enemies.map(e => [e.id, EN[e.type].idx, e.layer === 'u' ? 1 : 0, Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
     k: [...w.cracks].map(([i, t]) => [i, +t.toFixed(1)]),
-    c: [w.day, +w.time.toFixed(1), w.isNight ? 1 : 0, w.rain > 0 ? 1 : 0],
+    c: [w.day, +w.time.toFixed(1), w.isNight ? 1 : 0, w.rain > 0 ? 1 : 0, w.skipping ? 1 : 0],
   });
 }
 function flush(w) {
@@ -846,9 +975,9 @@ function fullSync(w, p) {
   return {
     code: w.code, me: p.id,
     defs: { T, SW, SH, UW, UH, NEST, UENT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, DAY_LEN, NIGHT_LEN, INV_SIZE, CHEST_SIZE, SUPPORT_RANGE },
-    rocks: w.rocks, dens: w.dens, grass: [...w.grass],
+    rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
-    objs: { s: [...w.objs.s].map(([i, o]) => [i, o.t, Math.round(o.hp)]), u: [...w.objs.u].map(([i, o]) => [i, o.t, Math.round(o.hp)]) },
+    objs: { s: [...w.objs.s].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]), u: [...w.objs.u].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]) },
     items: [...w.items.values()].map(compactItem),
     you: { l: p.layer, x: p.x, y: p.y, s: p.tpSeq },
     inv: p.inv, sel: p.sel,
@@ -891,8 +1020,8 @@ io.on('connection', socket => {
   socket.on('p', d => {
     const c = ctx(); if (!c || !d) return;
     const { w, p } = c;
-    p.ax = +d.ax || 0; p.ay = +d.ay || 0; p.lmb = !!d.l;
-    if (p.dead || d.s !== p.tpSeq) return;
+    p.ax = +d.ax || 0; p.ay = +d.ay || 0; p.lmb = !!d.l && !p.sleep;
+    if (p.dead || p.sleep || d.s !== p.tpSeq) return;
     const x = +d.x, y = +d.y;
     if (!isFinite(x) || !isFinite(y)) return;
     const now = Date.now(), el = Math.min(0.5, (now - p.lastPos) / 1000);
@@ -904,6 +1033,7 @@ io.on('connection', socket => {
     p.x = tmp.x; p.y = tmp.y; p.a = +d.a || 0;
   });
 
+  socket.on('wake', () => { const c = ctx(); if (c) wake(c.p); });
   socket.on('sel', i => { const c = ctx(); if (c && i >= 0 && i < 8) { c.p.sel = i | 0; } });
 
   socket.on('use', d => {
@@ -914,6 +1044,15 @@ io.on('connection', socket => {
     const idx = ty * LW(l) + tx, o = w.objs[l].get(idx);
     if (o && o.t === 'chest') { p.openChest = { l, idx }; socket.emit('chest', { l, i: idx, items: o.items }); return; }
     if (o && o.t === 'bench') { socket.emit('openCraft'); return; }
+    if (o && o.t === 'bed') {
+      p.bed = { l, i: idx };
+      if (!w.isNight) { msgTo(p, '🛏 ここを復活地点にした（夜になったら眠れる）'); return; }
+      if (w.enemies.some(e => e.layer === l && Math.hypot(e.x - p.x, e.y - p.y) < 200)) { msgTo(p, '近くに敵がいて眠れない！'); return; }
+      teleport(p, l, (tx + 0.5) * T, (ty + 0.5) * T);
+      p.sleep = true; p.lmb = false; p.dig = null;
+      msg(w, `💤 ${p.name}が眠った（全員が眠ると夜が早く過ぎる）`);
+      return;
+    }
     const s = p.inv[p.sel];
     if (!s) return;
     const def = ITEMS[s.id];
