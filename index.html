@@ -17,7 +17,7 @@
     background: radial-gradient(ellipse at 50% 30%, #3b2a17 0%, #120c07 70%);
   }
   #lobby .box { width: 420px; text-align: center; }
-  #lobby h1 { font-size: 58px; letter-spacing: 8px; color: #f0d9a8; text-shadow: 0 4px 0 #000, 0 0 30px rgba(240,200,120,.25); }
+  #lobby h1 { font-size: 46px; letter-spacing: 8px; color: #f0d9a8; text-shadow: 0 4px 0 #000, 0 0 30px rgba(240,200,120,.25); }
   #lobby .sub { color: #b9a685; margin: 6px 0 34px; letter-spacing: 2px; }
   #lobby input {
     width: 100%; font-size: 20px; padding: 11px 14px; border-radius: 6px; border: 2px solid #6b5636; background: #1d140b; color: #fff;
@@ -33,7 +33,34 @@
   #lobby .row { display: flex; gap: 10px; } #lobby .row > * { flex: 1; }
   #lobby .or { color: #7d6a4c; margin: 6px 0 14px; font-size: 13px; }
   #err { color: #ff8a7a; min-height: 22px; margin-top: 4px; }
-  #lobby .keys { margin-top: 26px; font-size: 13px; line-height: 1.9; color: #a08f72; }
+  #lobby .keys { margin-top: 22px; font-size: 12px; line-height: 1.9; color: #a08f72; }
+  #lobby { overflow-y: auto; align-items: flex-start; padding: 40px 0; }
+  #lobby .box { width: min(460px, 92vw); margin: auto; }
+  #lobby .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  #lobby .tabs button { flex: 1; margin: 0; background: #2b1f12; color: #b9a685; box-shadow: none; font-size: 15px; padding: 10px; }
+  #lobby .tabs button.on { background: #4b3a24; color: #f0d9a8; }
+  #lobby .note { font-size: 12px; color: #8f7d60; line-height: 1.7; }
+  #lobby .hello { color: #e8d8b8; margin-bottom: 8px; }
+  #lobby h3 { text-align: left; color: #f0d9a8; font-size: 15px; margin: 18px 0 8px; border-bottom: 1px solid #4b3a24; padding-bottom: 4px; }
+  #lobby h3 span { color: #8f7d60; font-weight: normal; font-size: 12px; }
+  #lobby button.small { width: auto; flex: 0 0 90px; height: 48px; margin: 0; }
+  #lobby button.mini { width: auto; padding: 4px 10px; font-size: 12px; margin: 0 0 0 8px; background: #3a2a18; color: #c8b796; box-shadow: none; }
+  #lobby button.mini.red { background: #6a2a20; color: #fbb; }
+  #lobby .wrow, #lobby .frow { display: flex; align-items: center; gap: 8px; background: #22180e; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; text-align: left; }
+  #lobby .wrow > div, #lobby .frow > div { flex: 1; min-width: 0; }
+  #lobby .wrow small, #lobby .frow small { display: block; color: #8f7d60; font-size: 11px; }
+  #lobby .wrow button { width: auto; margin: 0; padding: 7px 16px; font-size: 14px; }
+  #lobby .frow .fw { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  #lobby .frow .fw button { width: auto; margin: 0; padding: 5px 10px; font-size: 12px; box-shadow: none; }
+  #lobby .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #555; }
+  #lobby .dot.on { background: #4fd36a; }
+  #lobby .empty { color: #7d6a4c; font-size: 13px; padding: 6px; }
+  #lobby .inc { background: #2e2a12; border: 1px solid #6b5a2a; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; text-align: left; display: flex; align-items: center; }
+  #lobby .inc span { flex: 1; }
+  #lobby .row input { margin-bottom: 0; }
+  #lobby .row { margin-bottom: 8px; }
+  #err.ok { color: #9be39b; }
+  #leaveBtn { position: fixed; right: 12px; top: 214px; z-index: 5; padding: 6px 12px; border: 1px solid #6b5636; border-radius: 5px; background: rgba(24,17,10,.85); color: #e8d8b8; font-family: inherit; font-size: 12px; cursor: pointer; }
 
   #panel {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -54%); z-index: 10;
@@ -81,20 +108,31 @@
   <div class="box">
     <h1>ANT SURVIVAL</h1>
     <div class="sub">掘れ。運べ。夜を越えろ。</div>
-    <input id="nameIn" maxlength="10" placeholder="名前">
-    <button id="createBtn">新しいワールドを作る</button>
-    <div class="or">― または部屋番号で参加 ―</div>
-    <div class="row">
-      <input id="codeIn" maxlength="5" placeholder="5桁の部屋番号" inputmode="numeric">
-      <button id="joinBtn" class="sec" style="height:50px">参加</button>
+    <div id="authView">
+      <div class="tabs"><button data-tab="reg" class="on">はじめて遊ぶ</button><button data-tab="login">アカウント復元</button></div>
+      <input id="uName" maxlength="12" placeholder="ユーザーネーム（2〜12文字）" autocomplete="username">
+      <input id="uPass" type="password" maxlength="64" placeholder="パスワード（4文字以上）" autocomplete="current-password">
+      <button id="authBtn">アカウントを作る</button>
+      <div class="note" id="authNote">ユーザーネームとパスワードを覚えておけば、別の端末でもアカウントを復元できます。</div>
+    </div>
+    <div id="homeView" class="hidden">
+      <div class="hello">ようこそ <b id="hName"></b> さん <button id="logoutBtn" class="mini">ログアウト</button></div>
+      <h3>自分のワールド <span id="wCount"></span></h3>
+      <div id="myWorlds"></div>
+      <div class="row" id="createRow"><input id="wName" maxlength="16" placeholder="新しいワールドの名前"><button id="createBtn" class="small">作る</button></div>
+      <h3>フレンド</h3>
+      <div class="row"><input id="fName" maxlength="12" placeholder="ユーザーネームを入れて追加"><button id="addFriendBtn" class="small sec">追加</button></div>
+      <div id="incoming"></div>
+      <div id="friends"></div>
     </div>
     <div id="err"></div>
     <div class="keys">
-      WASD 移動 ／ 左クリック長押し・K 掘る・攻撃・壊す ／ 右クリック・O 置く ／ E 目の前を調べる・使う<br>
+      WASD 移動 ／ 左クリック長押し・K 掘る・攻撃 ／ 右クリック・O 置く ／ E 調べる・使う<br>
       1〜8・ホイール 持ち替え ／ Tab 持ち物・装備 ／ C クラフト ／ F 巣に出入り ／ Q 捨てる
     </div>
   </div>
 </div>
+<button id="leaveBtn" class="hidden">🏠 ロビーへ</button>
 <canvas id="c"></canvas>
 <div id="story" class="hidden"><div class="box">
   <h2>👑 消えた女王</h2>
@@ -117,7 +155,7 @@ function resize() { VW = cv.width = dark.width = innerWidth; VH = cv.height = da
 addEventListener('resize', resize); resize();
 
 // ================= 状態 =================
-let D = null, MEID = null, CODE = '';
+let D = null, MEID = null, CODE = '', WORLD_NAME = '';
 const me = { l: 'u', x: 0, y: 0, a: 0, s: 1, phase: 0 };
 let inv = [], sel = 0, under = null, rocks = [], dens = [], trees = [], deco = [];
 let touchMode = false, joy = null, wt = null, wakeT = 0;
@@ -131,19 +169,80 @@ const mouse = { x: 0, y: 0, l: false };
 const keys = {};
 const mm = document.createElement('canvas'); let mmDirty = true;
 
-// ================= ロビー =================
+// ================= ロビー（アカウント・ワールド・フレンド） =================
 const $ = id => document.getElementById(id);
-$('nameIn').value = localStorage.getItem('antName') || '';
-function join(create) {
-  const name = $('nameIn').value.trim() || 'アリ';
-  try { localStorage.setItem('antName', name); } catch (e) {}
-  $('err').textContent = '接続中…';
-  socket.emit('join', { name, create, code: $('codeIn').value.trim() });
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+let authTab = 'reg', loggedName = null, lobbyTimer = null;
+function showErr(t, ok) { $('err').textContent = t || ''; $('err').className = ok ? 'ok' : ''; }
+function getAuth() { try { return JSON.parse(localStorage.getItem('antAuth') || 'null'); } catch (e) { return null; } }
+function setAuth(v) { try { v ? localStorage.setItem('antAuth', JSON.stringify(v)) : localStorage.removeItem('antAuth'); } catch (e) {} }
+document.querySelectorAll('#lobby .tabs button').forEach(b => b.onclick = () => {
+  authTab = b.dataset.tab;
+  document.querySelectorAll('#lobby .tabs button').forEach(x => x.classList.toggle('on', x === b));
+  $('authBtn').textContent = authTab === 'reg' ? 'アカウントを作る' : 'アカウントを復元する';
+  $('authNote').textContent = authTab === 'reg' ? 'ユーザーネームとパスワードを覚えておけば、別の端末でもアカウントを復元できます。' : '前に作ったユーザーネームとパスワードを入れてください。';
+  showErr('');
+});
+function doAuth() {
+  const name = $('uName').value.trim(), pass = $('uPass').value;
+  showErr('…');
+  socket.emit(authTab === 'reg' ? 'register' : 'login', { name, pass });
 }
-$('createBtn').onclick = () => join(true);
-$('joinBtn').onclick = () => join(false);
-$('codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') join(false); });
-socket.on('err', t => $('err').textContent = t);
+$('authBtn').onclick = doAuth;
+$('uPass').addEventListener('keydown', e => { if (e.key === 'Enter') doAuth(); });
+$('logoutBtn').onclick = () => {
+  const a = getAuth();
+  socket.emit('logout', { token: a && a.token });
+  setAuth(null); loggedName = null; showLobby('auth');
+};
+$('createBtn').onclick = () => { socket.emit('createWorld', { name: $('wName').value.trim() }); $('wName').value = ''; };
+$('addFriendBtn').onclick = () => { const n = $('fName').value.trim(); if (n) socket.emit('addFriend', { name: n }); $('fName').value = ''; };
+$('fName').addEventListener('keydown', e => { if (e.key === 'Enter') $('addFriendBtn').onclick(); });
+$('lobby').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.play) { showErr('ワールドを読み込み中…', true); socket.emit('join', { code: b.dataset.play }); }
+  if (b.dataset.del && confirm(`「${b.dataset.name}」を削除しますか？\n元に戻せません。`)) socket.emit('deleteWorld', { code: b.dataset.del });
+  if (b.dataset.unfriend && confirm(`${b.dataset.unfriend} をフレンドから外しますか？`)) socket.emit('removeFriend', { name: b.dataset.unfriend });
+  if (b.dataset.addback) socket.emit('addFriend', { name: b.dataset.addback });
+});
+$('leaveBtn').onclick = () => { socket.emit('leave'); exitGame(); };
+function showLobby(view) {
+  $('lobby').classList.remove('hidden'); $('leaveBtn').classList.add('hidden');
+  $('authView').classList.toggle('hidden', view !== 'auth');
+  $('homeView').classList.toggle('hidden', view !== 'home');
+  clearInterval(lobbyTimer);
+  if (view === 'home') lobbyTimer = setInterval(() => socket.emit('lobby'), 5000);
+}
+function exitGame() { D = null; closePanel(); touchMode = false; joy = null; wt = null; mouse.l = false; showLobby(loggedName ? 'home' : 'auth'); if (loggedName) socket.emit('lobby'); }
+socket.on('connect', () => {
+  if (D) { D = null; closePanel(); }
+  const a = getAuth();
+  if (a && a.token) { showErr('ログイン中…', true); socket.emit('auth', a); } else showLobby('auth');
+});
+socket.on('authFail', () => { setAuth(null); showErr(''); showLobby('auth'); });
+socket.on('authErr', t => showErr(t));
+socket.on('loggedIn', d => {
+  loggedName = d.name;
+  if (d.token) setAuth({ name: d.name, token: d.token });
+  $('hName').textContent = d.name; $('uPass').value = '';
+  showErr(''); if (!D) showLobby('home');
+});
+socket.on('kicked', t => { exitGame(); showErr(t); });
+socket.on('err', t => showErr(t));
+socket.on('info', t => showErr(t, true));
+socket.on('lobby', d => {
+  $('wCount').textContent = `（${d.worlds.length}/${d.max}）`;
+  $('createRow').classList.toggle('hidden', d.worlds.length >= d.max);
+  $('myWorlds').innerHTML = d.worlds.map(w => `<div class="wrow"><div><b>${esc(w.name)}</b><small>${w.players ? `🐜 ${w.players}人が遊んでいる` : 'だれもいない'}</small></div><button data-play="${esc(w.code)}">遊ぶ</button><button class="mini red" data-del="${esc(w.code)}" data-name="${esc(w.name)}">削除</button></div>`).join('')
+    || '<div class="empty">まだワールドがありません。名前を入れて「作る」を押してね</div>';
+  $('incoming').innerHTML = d.incoming.map(n => `<div class="inc"><span>📩 <b>${esc(n)}</b> があなたをフレンドに追加しました</span><button class="mini" data-addback="${esc(n)}">追加し返す</button></div>`).join('');
+  $('friends').innerHTML = d.friends.map(f => `<div class="frow"><div>
+      <span class="dot ${f.online ? 'on' : ''}"></span><b>${esc(f.name)}</b>
+      <small>${f.mutual ? (f.online ? (f.inWorld ? `「${esc(f.inWorld)}」で遊んでいる` : 'オンライン') : 'オフライン') : '相手が追加してくれるのを待っています'}</small>
+      ${f.mutual ? `<div class="fw">${f.worlds.map(w => `<button class="sec" data-play="${esc(w.code)}">${esc(w.name)}${w.players ? ` 🐜${w.players}` : ''} に参加</button>`).join('') || '<small>ワールドがまだない</small>'}</div>` : ''}
+    </div><button class="mini red" data-unfriend="${esc(f.name)}">外す</button></div>`).join('')
+    || '<div class="empty">ユーザーネームを入れるとフレンドを追加できます。お互いに追加し合うと、相手のワールドに参加できます</div>';
+});
 
 // ================= 受信 =================
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -156,7 +255,8 @@ socket.on('world', d => {
   Object.assign(me, { l: d.you.l, x: d.you.x, y: d.you.y, s: d.you.s });
   inv = d.inv; sel = d.sel; equip = d.equip || { jaw: null, armor: null }; lair = d.lair; mmDirty = true; gameover = null; closePanel();
   try { if (d.quest.stage === 0 && !localStorage.getItem('story_' + d.code)) $('story').classList.remove('hidden'); } catch (e) {}
-  $('lobby').classList.add('hidden');
+  $('lobby').classList.add('hidden'); $('leaveBtn').classList.remove('hidden'); clearInterval(lobbyTimer); showErr('');
+  WORLD_NAME = d.worldName || '';
   for (const k in RP) delete RP[k];
   for (const k in RE) delete RE[k];
 });
@@ -1049,7 +1149,7 @@ function drawHUD(dt, ms) {
   }
   ctx.restore();
   ctx.fillStyle = '#c8b796'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(`部屋番号 ${CODE}　/　${st ? st.p.length : 1}人`, mx + mw / 2, my + mh + 15);
+  ctx.fillText(`${WORLD_NAME}　/　${st ? st.p.length : 1}人`, mx + mw / 2, my + mh + 15);
 
   // 巣の方向（地上）
   if (me.l === 's' && ms && !ms[9]) {
