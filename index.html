@@ -457,13 +457,18 @@ addEventListener('keydown', e => {
   if (e.code === 'Tab') { e.preventDefault(); panel === 'inv' ? closePanel() : openPanel('inv'); }
   if (e.code === 'KeyC') panel === 'craft' ? closePanel() : openPanel('craft');
   if (e.code === 'KeyJ') panel === 'journal' ? closePanel() : openPanel('journal');
-  if (e.code === 'Escape') closePanel();
+  if (e.code === 'Escape') { if (!$('story').classList.contains('hidden')) $('storyBtn').click(); closePanel(); }
   if (e.code === 'KeyE' && !e.repeat) interactFront();
   if (e.code === 'KeyO' && !e.repeat) placeFront();
   if (e.code === 'KeyF') socket.emit('enter');
   if (e.code === 'KeyQ') socket.emit('drop', sel);
   if (/^Digit[1-8]$/.test(e.code)) setSel(+e.code.slice(5) - 1);
-  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) socket.emit('mash'); }
+  if (e.code === 'Space') {                                   // 表示中のものを閉じる → なければ「もがく」
+    e.preventDefault(); if (e.repeat) return;
+    if (!$('story').classList.contains('hidden')) $('storyBtn').click();
+    else if (panel) closePanel();
+    else socket.emit('mash');
+  }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.l = false; });
@@ -2072,7 +2077,7 @@ function renderPanel() {
   } else if (panel === 'board' && npc) {
     h = npc.lines.map(l => `<div class="qstep">${esc(l)}</div>`).join('');
   }
-  $('ptitle').innerHTML = `${title} <small>${touchMode ? '' : 'Esc で閉じる'}</small>`;
+  $('ptitle').innerHTML = `${title} <small>${touchMode ? '' : 'Space / Esc で閉じる'}</small>`;
   body.innerHTML = h;
   $('phint').textContent = hint;
 }
