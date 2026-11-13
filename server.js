@@ -9,7 +9,7 @@ const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { maxHttpBufferSize: 8e6 });   // ワールドのバックアップ（数百KB）を受け取れるように
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 // ================= 基本設定 =================
@@ -31,25 +31,35 @@ const SUPPORT_RANGE = 2;            // 土の壁から何マス以内なら支�
 const CRACK_TIME = 5;               // ヒビが入ってから崩れるまでの秒数
 const ALL_DEAD_GAMEOVER = false;    // true にすると全員同時に死んだらワールドがリセット（今はオフ）
 const MAX_WORLDS = 3;               // 1人が作れるワールドの数
-const SAVE_INTERVAL = 60;
+const SAVE_INTERVAL = 30;
 const SAVE_DIR = path.join(__dirname, 'saves');
+// バックアップの署名用の秘密の文字列（Renderの環境変数 SAVE_SECRET に好きな長い文字列を入れるとより安全）
+const SAVE_SECRET = process.env.SAVE_SECRET || 'ant-survival-backup-key-v1';
+const signStr = str => crypto.createHmac('sha256', SAVE_SECRET).update(str).digest('hex');
 const QUEST_VERSION = 2;
 const CUBE_R = 18;                  // 角砂糖ブロックの大きさ
 const dragSpeed = n => Math.min(130, 42 + 34 * (n - 1));   // 引っぱる人数ごとの速さ
 const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#e67e22', '#1abc9c', '#f1c40f', '#ecf0f1', '#e84393'];
-const LAYERS = ['s', 'u', 't'];     // 地上・巣の中・商店街
+const LAYERS = ['s', 'u', 't', 'u2', 'u3'];   // 地上・巣の中(地下1階)・商店街・地下2階・地下3階
 const LC = l => LAYERS.indexOf(l);
+const UL = ['u', 'u2', 'u3'];
+const isUnder = l => UL.includes(l);
+const FLOOR_NO = { u: 1, u2: 2, u3: 3 };
+const SAFE_R = 10 * 32;             // 巣のまわりの安全圏（鳥・アリジゴク・カマキリが出ない）
 
 // タイル（地下と商店街で共通）
-const U = { OPEN: 0, DIRT: 1, CLAY: 2, ROOT: 3, GLOW: 4, HARD: 5, RUBBLE: 6, ENT: 7, BIGROOT: 8 };
-const isNatSolid = v => (v >= 1 && v <= 6) || v === 8;
+const U = { OPEN: 0, DIRT: 1, CLAY: 2, ROOT: 3, GLOW: 4, HARD: 5, RUBBLE: 6, ENT: 7, BIGROOT: 8, STAIR_DN: 9, STAIR_UP: 10, FOSSIL: 11, CRYSTAL: 12 };
+const isNatSolid = v => (v >= 1 && v <= 6) || v === 8 || v === 11 || v === 12;
 const TILE_INFO = {
   1: { h: 10, drop: [['dirt', 1]] },
   2: { h: 25, jaw: 2, need: '粘土を掘るには「小石の大あご」が必要', drop: [['clay', 1]] },
   3: { h: 15, drop: [['root', 1], ['dirt', 1]] },
   4: { h: 6, drop: [['glow', 1]] },
   8: { h: 40, jaw: 3, need: '巨大な根をかじるには「甲殻の大あご」が必要', drop: [['root', 3]] },
+  11: { h: 30, jaw: 2, need: '化石を掘るには「小石の大あご」が必要', drop: [['fossil', 1], ['dirt', 1]] },
+  12: { h: 45, jaw: 3, need: '結晶を掘るには「甲殻の大あご」が必要', drop: [['crystal', 1]] },
 };
+const DIGDOWN_HARD = 40;            // 下に掘る穴の硬さ
 
 const ITEMS = {
   crumb: { n: 'パンくず', food: 8 }, seed: { n: '種', food: 12 }, sugar: { n: '角砂糖のかけら', food: 35 },
@@ -64,16 +74,29 @@ const ITEMS = {
   pillarD: { n: '土の柱', place: 'pillarD' }, pillarR: { n: '根っこの柱', place: 'pillarR' },
   lamp: { n: 'キノコランプ', place: 'lamp' }, spike: { n: 'トゲ罠', place: 'spike' }, net: { n: '糸のネット', place: 'net' },
   bed: { n: '葉っぱのベッド', place: 'bed' },
-  jaw2: { n: '小石の大あご', jaw: 2, stack: 1 }, jaw3: { n: '甲殻の大あご', jaw: 3, stack: 1 },
-  armor1: { n: '葉のマント', armor: 0.15, stack: 1 }, armor2: { n: '甲殻アーマー', armor: 0.4, stack: 1 },
+  jaw2: { n: '小石の大あご', jaw: 2, stack: 1 }, jaw3: { n: '甲殻の大あご', jaw: 3, stack: 1 }, jaw4: { n: 'カマキリの大あご', jaw: 4, stack: 1 },
+  armor1: { n: '葉のマント', armor: 0.15, stack: 1 }, armor2: { n: '甲殻アーマー', armor: 0.4, stack: 1 }, armor3: { n: '化石のよろい', armor: 0.55, stack: 1 },
+  // 地下深く・カマキリから取れる素材
+  fossil: { n: '化石のかけら' }, crystal: { n: '光る結晶' }, mantisBlade: { n: 'カマキリの鎌' },
+  water: { n: '水のしずく', food: 2, cool: 60 },
+  // 外の危険への対策
+  shelter: { n: '葉っぱの屋根', place: 'shelter' }, flag: { n: 'フェロモンの旗', place: 'flag' }, crystalLamp: { n: '結晶ランプ', place: 'crystalLamp' },
+  rope: { n: '糸のロープ', tool: 'rope' }, repel: { n: '刺激臭の玉', tool: 'repel' },
+  cloak: { n: '草のかくれみの', acc: 1, stack: 1 }, parasol: { n: '葉っぱの日傘', acc: 1, stack: 1 },
+  sensor: { n: 'においセンサー', acc: 1, stack: 1 }, floater: { n: '草の浮き輪', acc: 1, stack: 1 },
 };
-const JAW = { 1: { dig: 12, atk: 10 }, 2: { dig: 20, atk: 18 }, 3: { dig: 30, atk: 28 } };
+const ACC_INFO = {
+  cloak: '鳥が来たとき止まっていれば見つからない', parasol: '日差しで体温が上がりにくい',
+  sensor: 'アリジゴクの巣とカマキリが遠くから見える', floater: '水たまりで溺れない・遅くなりにくい',
+};
+const JAW = { 1: { dig: 12, atk: 10 }, 2: { dig: 20, atk: 18 }, 3: { dig: 30, atk: 28 }, 4: { dig: 34, atk: 40 } };
 const OBJ = {
   chest: { solid: 1, hp: 40 }, bench: { solid: 1, hp: 40 },
   barricade: { solid: 1, hp: 60 }, clayWall: { solid: 1, hp: 180 },
   pillarD: { solid: 1, hp: 50, support: 3 }, pillarR: { solid: 1, hp: 90, support: 5 },
   lamp: { solid: 0, hp: 10, light: 1 }, spike: { solid: 0, hp: 40 }, net: { solid: 0, hp: 30 },
   bed: { solid: 0, hp: 30 },
+  shelter: { solid: 0, hp: 30, cover: 1 }, flag: { solid: 0, hp: 20 }, crystalLamp: { solid: 0, hp: 20, light: 1 },
   // 自然にあるもの（壊すと素材が出る）
   branch: { solid: 1, hp: 36, natural: 1, drop: [['twig', 5]] },               // 落ちた枝
   bigLeaf: { solid: 0, hp: 12, natural: 1, drop: [['leaf', 4]] },              // 大きな落ち葉
@@ -105,10 +128,24 @@ const RECIPES = [
   { out: 'net', n: 1, cost: { silk: 3 }, bench: 1 },
   { out: 'jaw3', n: 1, cost: { shell: 2, pebble: 2, silk: 2 }, bench: 1 },
   { out: 'armor2', n: 1, cost: { shell: 4, silk: 2 }, bench: 1 },
+  // 外の危険への対策
+  { out: 'shelter', n: 1, cost: { leaf: 4, twig: 2 } },
+  { out: 'flag', n: 2, cost: { twig: 1, leaf: 1 } },
+  { out: 'parasol', n: 1, cost: { leaf: 4, twig: 1 } },
+  { out: 'rope', n: 1, cost: { silk: 2, twig: 1 } },
+  { out: 'floater', n: 1, cost: { grass: 6, leaf: 2 } },
+  { out: 'cloak', n: 1, cost: { grass: 8, silk: 1 }, bench: 1 },
+  { out: 'sensor', n: 1, cost: { glow: 1, needle: 2, root: 1 }, bench: 1 },
+  { out: 'repel', n: 2, cost: { grass: 3, needle: 2 }, bench: 1 },
+  // 地下深く・カマキリの素材
+  { out: 'crystalLamp', n: 1, cost: { crystal: 1, glow: 1 }, bench: 1 },
+  { out: 'jaw4', n: 1, cost: { mantisBlade: 2, shell: 2, silk: 2 }, bench: 1 },
+  { out: 'armor3', n: 1, cost: { fossil: 4, shell: 2, silk: 2 }, bench: 1 },
 ];
 const EN = {
   spider: { idx: 0, n: 'クモ', hp: 45, spd: 125, dmg: 12, r: 13, detect: 260, chew: 10, drops: [['meat', 1, 1], ['silk', 1, 2]] },
   beetle: { idx: 1, n: 'カブトムシ', hp: 120, spd: 62, dmg: 22, r: 15, detect: 200, chew: 25, drops: [['meat', 1, 2], ['shell', 1, 2]] },
+  mantis: { idx: 3, n: 'カマキリ', hp: 150, spd: 0, dmg: 10, r: 16, detect: 64, chew: 0, drops: [['mantisBlade', 1, 2], ['meat', 1, 2]] },
   boss: { idx: 2, n: '巨大グモ', hp: 900, spd: 92, dmg: 24, r: 34, detect: 520, chew: 30, drops: [['shell', 4, 5], ['silk', 6, 8], ['meat', 4, 5]] },
 };
 // 地上の資源（巣からの距離ゾーンごと）
@@ -125,8 +162,9 @@ const SHOP_BUY = [
   { id: 'crumb', n: 5, price: 3 }, { id: 'fruit', n: 1, price: 4 }, { id: 'cookie', n: 1, price: 6 },
   { id: 'glow', n: 2, price: 6 }, { id: 'silk', n: 2, price: 8 }, { id: 'shell', n: 1, price: 10 },
   { id: 'lamp', n: 1, price: 9 }, { id: 'bed', n: 1, price: 10 }, { id: 'armor1', n: 1, price: 16 }, { id: 'jaw2', n: 1, price: 22 },
+  { id: 'water', n: 2, price: 4 }, { id: 'rope', n: 1, price: 6 }, { id: 'parasol', n: 1, price: 10 }, { id: 'floater', n: 1, price: 10 },
 ];
-const SELL = { crumb: 1, seed: 1, fruit: 2, meat: 2, grass: 1, leaf: 1, twig: 1, pebble: 1, needle: 1, clay: 2, root: 2, glow: 2, silk: 3, shell: 5, sugar: 3, cookie: 3 };
+const SELL = { crumb: 1, seed: 1, fruit: 2, meat: 2, grass: 1, leaf: 1, twig: 1, pebble: 1, needle: 1, clay: 2, root: 2, glow: 2, silk: 3, shell: 5, sugar: 3, cookie: 3, water: 1, fossil: 12, crystal: 22, mantisBlade: 8 };
 const GACHA_COST = 10;
 const GACHA = [   // [確率%, ランク, アイテム, 個数]
   [15, 0, 'crumb', 5], [15, 0, 'leaf', 5], [15, 0, 'twig', 5], [15, 0, 'pebble', 4],
@@ -157,13 +195,13 @@ function vnoise(x, y, s) {
   const a = hash2(xi, yi, s), b = hash2(xi + 1, yi, s), c = hash2(xi, yi + 1, s), d = hash2(xi + 1, yi + 1, s);
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
-const LW = l => (l === 'u' ? UW : l === 't' ? TW : SW);
-const LH = l => (l === 'u' ? UH : l === 't' ? TH : SH);
+const LW = l => (isUnder(l) ? UW : l === 't' ? TW : SW);
+const LH = l => (isUnder(l) ? UH : l === 't' ? TH : SH);
 const zoneOf = (x, y) => { const d = Math.hypot(x - NEST.x, y - NEST.y) / T; return d < 30 ? 1 : d < 62 ? 2 : 3; };
 
 // ---- インベントリ（0〜7：ホットバー、8〜23：バッグ） ----
 const maxStack = id => ITEMS[id].stack || STACK;
-const prefersHotbar = id => { const d = ITEMS[id]; return !!(d.food || d.place || d.jaw || d.armor); };
+const prefersHotbar = id => { const d = ITEMS[id]; return !!(d.food || d.place || d.jaw || d.armor || d.tool || d.acc); };
 function addItem(inv, id, n) {
   for (const s of inv) if (s && s.id === id && s.n < maxStack(id)) {
     const k = Math.min(n, maxStack(id) - s.n); s.n += k; n -= k; if (!n) return 0;
@@ -186,23 +224,27 @@ const hasAll = (inv, need) => Object.entries(need).every(([id, n]) => countItem(
 // 装備（大あご・よろい）
 const jawOf = p => (p.equip && p.equip.jaw ? ITEMS[p.equip.jaw.id].jaw : 1);
 const armorOf = p => (p.equip && p.equip.armor ? ITEMS[p.equip.armor.id].armor : 0);
-const equipSlotOf = id => (ITEMS[id].jaw ? 'jaw' : ITEMS[id].armor ? 'armor' : null);
-const newEquip = () => ({ jaw: null, armor: null });
+const equipSlotOf = id => (ITEMS[id].jaw ? 'jaw' : ITEMS[id].armor ? 'armor' : ITEMS[id].acc ? 'acc' : null);
+const newEquip = () => ({ jaw: null, armor: null, acc1: null, acc2: null });
+const hasAcc = (p, id) => !!(p.equip && ((p.equip.acc1 && p.equip.acc1.id === id) || (p.equip.acc2 && p.equip.acc2.id === id)));
 
 // ================= ワールド生成 =================
-function genUnder(seed) {
+function genUnder(seed, depth = 1) {
   const g = new Uint8Array(UW * UH).fill(U.DIRT);
+  const hardTh = [0, 0.72, 0.64, 0.58][depth], clayBase = [0, 0.64, 0.56, 0.5][depth];
   for (let ty = 0; ty < UH; ty++) for (let tx = 0; tx < UW; tx++) {
     const i = ty * UW + tx;
     if (tx < 2 || ty < 2 || tx >= UW - 2 || ty >= UH - 2) { g[i] = U.HARD; continue; }
     const d = Math.hypot(tx - UCX, ty - UCY);
-    if (d < 6) continue;
+    if (d < 6 && depth === 1) continue;
     const n1 = vnoise(tx / 7, ty / 7, seed), n2 = vnoise(tx / 9, ty / 9, seed + 7);
-    if (n2 > 0.72 && d > 14) g[i] = U.HARD;
-    else if (n1 > 0.64 - Math.min(0.12, d / 500)) g[i] = U.CLAY;
-    else if (Math.random() < 0.018) g[i] = U.GLOW;
+    if (n2 > hardTh && (d > 14 || depth > 1)) g[i] = U.HARD;
+    else if (n1 > clayBase - Math.min(0.12, d / 500)) g[i] = U.CLAY;
+    else if (depth >= 2 && Math.random() < (depth === 2 ? 0.014 : 0.006)) g[i] = U.FOSSIL;
+    else if (depth === 3 && Math.random() < 0.012) g[i] = U.CRYSTAL;
+    else if (Math.random() < (depth === 1 ? 0.018 : 0.01)) g[i] = U.GLOW;
   }
-  for (let v = 0; v < 35; v++) {           // 木の根の筋
+  for (let v = 0; v < (depth === 1 ? 35 : 12); v++) {           // 木の根の筋
     let x = randi(4, UW - 5), y = randi(4, UH - 5), a = rand(0, 6.28);
     if (Math.hypot(x - UCX, y - UCY) < 6) continue;
     const len = randi(8, 24);
@@ -212,7 +254,7 @@ function genUnder(seed) {
       a += rand(-0.6, 0.6); x = clamp(x + Math.cos(a), 3, UW - 4); y = clamp(y + Math.sin(a), 3, UH - 4);
     }
   }
-  for (let v = 0; v < 7; v++) {            // 巨大な木の根
+  for (let v = 0; v < (depth === 3 ? 2 : 7); v++) {            // 巨大な木の根
     let x = randi(6, UW - 7), y = randi(6, UH - 7), a = rand(0, 6.28);
     if (Math.hypot(x - UCX, y - UCY) < 14) continue;
     const len = randi(30, 60);
@@ -225,8 +267,10 @@ function genUnder(seed) {
       a += rand(-0.25, 0.25); x = clamp(x + Math.cos(a), 3, UW - 5); y = clamp(y + Math.sin(a), 3, UH - 5);
     }
   }
-  for (let ty = UCY - 2; ty < UCY + 2; ty++) for (let tx = UCX - 2; tx < UCX + 2; tx++) g[ty * UW + tx] = U.OPEN;
-  g[UENT.ty * UW + UENT.tx] = U.ENT;
+  if (depth === 1) {
+    for (let ty = UCY - 2; ty < UCY + 2; ty++) for (let tx = UCX - 2; tx < UCX + 2; tx++) g[ty * UW + tx] = U.OPEN;
+    g[UENT.ty * UW + UENT.tx] = U.ENT;
+  }
   return g;
 }
 function genCaverns(w) {                   // 地下の小さな空洞（虫の亡骸）
@@ -273,6 +317,7 @@ function genTown(w) {
   w.objs.t = m;
 }
 
+const inPit = (w, x, y, pad) => (w.pits || []).some(q => Math.hypot(q.x - x, q.y - y) < q.r + pad);
 function inRock(w, x, y, pad) {
   for (const o of w.rocks) if (Math.hypot(o.x - x, o.y - y) < o.r + pad) return true;
   return false;
@@ -364,7 +409,7 @@ function randomSurfacePoint(w, z) {
   for (let k = 0; k < 60; k++) {
     const x = rand(2 * T, SW * T - 2 * T), y = rand(2 * T, SH * T - 2 * T);
     if (z && zoneOf(x, y) !== z) continue;
-    if (Math.hypot(x - NEST.x, y - NEST.y) < 120 || inRock(w, x, y, 12)) continue;
+    if (Math.hypot(x - NEST.x, y - NEST.y) < 120 || inRock(w, x, y, 12) || inPit(w, x, y, 40)) continue;
     if (w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
     return { x: Math.round(x), y: Math.round(y) };
   }
@@ -377,7 +422,7 @@ function pointNear(w, list, z, r0, r1) {
     const o = cand[randi(0, cand.length - 1)], a = rand(0, 6.28), d = o.r + rand(r0, r1);
     const x = o.x + Math.cos(a) * d, y = o.y + Math.sin(a) * d;
     if (x < 2 * T || y < 2 * T || x > SW * T - 2 * T || y > SH * T - 2 * T) continue;
-    if (inRock(w, x, y, 12) || w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
+    if (inRock(w, x, y, 12) || inPit(w, x, y, 40) || w.objs.s.has(Math.floor(y / T) * SW + Math.floor(x / T))) continue;
     return { x: Math.round(x), y: Math.round(y) };
   }
   return null;
@@ -428,10 +473,13 @@ function createWorld(code) {
   const w = baseWorld(code);
   w.seed = seed;
   genSurface(w);
-  w.under = genUnder(seed);
+  w.under = genUnder(seed, 1);
+  w.grids = { u: w.under, u2: genUnder(seed + 101, 2), u3: genUnder(seed + 202, 3) };
   genCaverns(w);
   genTown(w);
   genQuest(w);
+  genHazards(w);
+  spawnMantises(w);
   for (const r of RES) for (let k = 0; k < r.n; k++) spawnRes(w, r);
   spawnNodes(w);
   spawnCubes(w);
@@ -441,10 +489,11 @@ function createWorld(code) {
 function baseWorld(code) {
   return {
     code, seed: 0, day: 1, time: 0, isNight: false, rain: 0, owner: null, name: 'ワールド',
-    rocks: [], dens: [], trees: [], deco: [], grass: new Map(), under: null, objs: { s: new Map(), u: new Map(), t: new Map() },
-    items: new Map(), resCount: {}, saved: {}, players: {}, enemies: [], cracks: new Map(), cubes: [],
+    rocks: [], dens: [], trees: [], deco: [], grass: new Map(), under: null, grids: {}, objs: { s: new Map(), u: new Map(), t: new Map(), u2: new Map(), u3: new Map() },
+    items: new Map(), resCount: {}, saved: {}, players: {}, enemies: [], cracks: { u: new Map(), u2: new Map(), u3: new Map() }, cubes: [],
     lair: { x: 0, y: 0 }, townPos: { x: 0, y: 0 }, quest: null, queen: null,
     human: null, nextHuman: 2 + randi(0, 1), humanAt: rand(30, 110), prints: [],
+    sand: [], pits: [], puddles: [], mantisSpots: [], wet: 0, bird: null, birdCd: 40, army: null, nextArmy: 4 + randi(0, 1), armyAt: rand(20, 120), repels: [],
     nextId: 1, tileQ: [], grassQ: [], objQ: new Map(), gameOver: false,
     secT: 1, saveT: 0, tickN: 0,
   };
@@ -491,14 +540,16 @@ function playerSave(p) {
 function serialize(w) {
   for (const p of Object.values(w.players)) w.saved[p.name] = playerSave(p);
   return {
-    v: 2, seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId, owner: w.owner, name: w.name,
+    v: 2, code: w.code, savedAt: Date.now(), seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId, owner: w.owner, name: w.name,
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
-    objs: { s: [...w.objs.s], u: [...w.objs.u] },
+    under2: Buffer.from(w.grids.u2).toString('base64'), under3: Buffer.from(w.grids.u3).toString('base64'),
+    objs: { s: [...w.objs.s], u: [...w.objs.u], u2: [...w.objs.u2], u3: [...w.objs.u3] },
     items: [...w.items.values()].map(({ id, noPickId, noPickUntil, ...rest }) => rest),
     cubes: w.cubes.map(c => ({ x: Math.round(c.x), y: Math.round(c.y) })),
     saved: w.saved, lair: w.lair, townPos: w.townPos, quest: w.quest, queen: w.queen,
     nextHuman: w.nextHuman, humanAt: w.humanAt,
+    sand: w.sand, pits: w.pits, puddles: w.puddles, mantisSpots: w.mantisSpots, nextArmy: w.nextArmy, armyAt: w.armyAt,
   };
 }
 function deserialize(code, d) {
@@ -510,7 +561,12 @@ function deserialize(code, d) {
   });
   w.grass = new Map(d.grass);
   w.under = new Uint8Array(Buffer.from(d.under, 'base64'));
-  w.objs = { s: new Map(d.objs.s), u: new Map(d.objs.u), t: new Map() };
+  w.grids = {
+    u: w.under,
+    u2: d.under2 ? new Uint8Array(Buffer.from(d.under2, 'base64')) : genUnder(d.seed + 101, 2),
+    u3: d.under3 ? new Uint8Array(Buffer.from(d.under3, 'base64')) : genUnder(d.seed + 202, 3),
+  };
+  w.objs = { s: new Map(d.objs.s), u: new Map(d.objs.u), t: new Map(), u2: new Map(d.objs.u2 || []), u3: new Map(d.objs.u3 || []) };
   for (const it of d.items) {
     it.id = w.nextId++;
     w.items.set(it.id, it);
@@ -518,7 +574,7 @@ function deserialize(code, d) {
   }
   w.cubes = (d.cubes || []).map(c => ({ id: w.nextId++, x: c.x, y: c.y, grab: [] }));
   // 古いデータの変換
-  for (const l of ['s', 'u']) for (const [i, o] of [...w.objs[l]]) {
+  for (const l of ['s', 'u', 'u2', 'u3']) for (const [i, o] of [...w.objs[l]]) {
     if (o.t === 'sugarNode') { w.objs[l].delete(i); w.cubes.push({ id: w.nextId++, x: (i % SW + 0.5) * T, y: (Math.floor(i / SW) + 0.5) * T, grab: [] }); }
     else if (!OBJ[o.t] || OBJ[o.t].fixed) w.objs[l].delete(i);
   }
@@ -532,13 +588,24 @@ function deserialize(code, d) {
   }
   if (w.quest.stage === 6 && !w.quest.bossDead) spawnBoss(w);
   if (w.cubes.length < CUBES_WANT) spawnCubes(w);
+  if (d.pits) Object.assign(w, { sand: d.sand, pits: d.pits, puddles: d.puddles, mantisSpots: d.mantisSpots, nextArmy: d.nextArmy || w.day + 4, armyAt: d.armyAt || 60 });
+  else genHazards(w);
+  spawnMantises(w);
   recomputeSupport(w);
   return w;
+}
+function makeBackup(w, data) {
+  const str = JSON.stringify(data || serialize(w));
+  return { code: w.code, name: w.name, s: str, sig: signStr(str), at: Date.now() };
 }
 function saveWorld(w) {
   if (w.gameOver) return Promise.resolve();
   w.savePromise = (w.savePromise || Promise.resolve())       // 保存は順番に1つずつ
-    .then(() => dbSave(w.code, serialize(w)))
+    .then(() => {
+      const data = serialize(w);
+      if (Object.keys(w.players).length) io.to(w.code).emit('backup', makeBackup(w, data));   // 遊んでいる人のブラウザにも控えを保存
+      return dbSave(w.code, data);
+    })
     .catch(e => console.error('保存失敗', w.code, e.message));
   return w.savePromise;
 }
@@ -562,8 +629,15 @@ async function accGet(name) {
   if (a) accCache.set(k, a);
   return a;
 }
+function sendAccBackup(a) {
+  const sk = socketOf(a._id);
+  if (!sk) return;
+  const str = JSON.stringify(a);
+  sk.emit('accBackup', { name: a.name, s: str, sig: signStr(str) });
+}
 async function accPut(a) {
   accCache.set(a._id, a);
+  setTimeout(() => sendAccBackup(a), 0);
   if (accCol) { await accCol.replaceOne({ _id: a._id }, a, { upsert: true }); return; }
   fs.mkdirSync(ACC_DIR, { recursive: true });
   fs.writeFileSync(path.join(ACC_DIR, encodeURIComponent(a._id) + '.json'), JSON.stringify(a));
@@ -652,7 +726,7 @@ function setObj(w, l, idx, o) {
 }
 
 // ================= 衝突 =================
-const gridOf = (w, l) => (l === 'u' ? w.under : l === 't' ? TOWN_GRID : null);
+const gridOf = (w, l) => (isUnder(l) ? w.grids[l] : l === 't' ? TOWN_GRID : null);
 function solidAt(w, l, tx, ty) {
   if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return true;
   const idx = ty * LW(l) + tx, g = gridOf(w, l);
@@ -694,67 +768,98 @@ function circleHitsTile(x, y, r, tx, ty) {
   return Math.hypot(x - cx, y - cy) < r;
 }
 
-// ================= 崩落（支えのない空間はまとめて崩れる） =================
-const isProtected = (w, i) => { const o = w.objs.u.get(i); return !!(o && OBJ[o.t].qs !== undefined); };
-function recomputeSupport(w) {
-  const g = w.under, pillars = [];
-  for (const [i, o] of w.objs.u) if (OBJ[o.t].support) pillars.push([i % UW, (i / UW) | 0, OBJ[o.t].support]);
-  const R = SUPPORT_RANGE, fresh = [];
-  for (let ty = 0; ty < UH; ty++) for (let tx = 0; tx < UW; tx++) {
-    const i = ty * UW + tx;
-    if (g[i] !== U.OPEN) { w.cracks.delete(i); continue; }
-    let ok = isProtected(w, i);
-    for (let dy = -R; dy <= R && !ok; dy++) for (let dx = -R; dx <= R; dx++) {
-      const x = tx + dx, y = ty + dy;
-      if (x < 0 || y < 0 || x >= UW || y >= UH || isNatSolid(g[y * UW + x])) { ok = true; break; }
+// ================= 崩落（支えのない空間はまとめて崩れる。地下1〜3階それぞれ） =================
+const isProtected = (w, l, i) => { const o = w.objs[l].get(i); return !!(o && OBJ[o.t].qs !== undefined); };
+function recomputeSupport(w, only) {
+  for (const l of only ? [only] : UL) {
+    const g = w.grids[l], cracks = w.cracks[l], pillars = [];
+    for (const [i, o] of w.objs[l]) if (OBJ[o.t].support) pillars.push([i % UW, (i / UW) | 0, OBJ[o.t].support]);
+    const R = SUPPORT_RANGE, fresh = [];
+    for (let ty = 0; ty < UH; ty++) for (let tx = 0; tx < UW; tx++) {
+      const i = ty * UW + tx;
+      if (g[i] !== U.OPEN) { cracks.delete(i); continue; }
+      let ok = isProtected(w, l, i);
+      for (let dy = -R; dy <= R && !ok; dy++) for (let dx = -R; dx <= R; dx++) {
+        const x = tx + dx, y = ty + dy;
+        if (x < 0 || y < 0 || x >= UW || y >= UH || isNatSolid(g[y * UW + x])) { ok = true; break; }
+      }
+      if (!ok) for (const [px, py, r] of pillars) if ((px - tx) ** 2 + (py - ty) ** 2 <= r * r + 0.5) { ok = true; break; }
+      if (ok) cracks.delete(i);
+      else if (!cracks.has(i)) fresh.push(i);
     }
-    if (!ok) for (const [px, py, r] of pillars) if ((px - tx) ** 2 + (py - ty) ** 2 <= r * r + 0.5) { ok = true; break; }
-    if (ok) w.cracks.delete(i);
-    else if (!w.cracks.has(i)) fresh.push(i);
-  }
-  for (const i of fresh) {                    // 隣のヒビと同じタイミングで崩れる
-    let t = CRACK_TIME;
-    for (const j of [i - 1, i + 1, i - UW, i + UW]) if (w.cracks.has(j)) t = Math.min(t, w.cracks.get(j));
-    w.cracks.set(i, t);
+    for (const i of fresh) {                  // 隣のヒビと同じタイミングで崩れる
+      let t = CRACK_TIME;
+      for (const j of [i - 1, i + 1, i - UW, i + UW]) if (cracks.has(j)) t = Math.min(t, cracks.get(j));
+      cracks.set(i, t);
+    }
   }
 }
 function updateCracks(w) {
-  if (!w.cracks.size) return;
-  const due = [];
-  for (const [i, t] of w.cracks) { const nt = t - DT; w.cracks.set(i, nt); if (nt <= 0) due.push(i); }
-  if (!due.length) return;
-  // ヒビがつながっている範囲＋そのまわり1マスをまとめて崩す
-  const area = new Set(), stack = [...due];
-  while (stack.length) {
-    const i = stack.pop();
-    if (area.has(i)) continue;
-    area.add(i);
-    const x = i % UW, y = (i / UW) | 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const j = (y + dy) * UW + x + dx; if (w.cracks.has(j) && !area.has(j)) stack.push(j); }
-  }
-  const ring = new Set();
-  for (const i of area) {
-    const x = i % UW, y = (i / UW) | 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const j = (y + dy) * UW + x + dx;
-      if (!area.has(j) && w.under[j] === U.OPEN && !isProtected(w, j)) ring.add(j);
+  for (const l of UL) {
+    const cracks = w.cracks[l], g = w.grids[l];
+    if (!cracks.size) continue;
+    const due = [];
+    for (const [i, t] of cracks) { const nt = t - DT; cracks.set(i, nt); if (nt <= 0) due.push(i); }
+    if (!due.length) continue;
+    const area = new Set(), stack = [...due];         // つながっているヒビ全部＋まわり1マス
+    while (stack.length) {
+      const i = stack.pop();
+      if (area.has(i)) continue;
+      area.add(i);
+      const x = i % UW, y = (i / UW) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const j = (y + dy) * UW + x + dx; if (cracks.has(j) && !area.has(j)) stack.push(j); }
     }
+    const ring = new Set();
+    for (const i of area) {
+      const x = i % UW, y = (i / UW) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const j = (y + dy) * UW + x + dx;
+        if (!area.has(j) && g[j] === U.OPEN && !isProtected(w, l, j)) ring.add(j);
+      }
+    }
+    const fell = [...area, ...ring];
+    for (const i of fell) collapseTile(w, l, i);
+    io.to(w.code).emit('collapse', { l, list: fell });
+    recomputeSupport(w, l);
   }
-  const fell = [...area, ...ring];
-  for (const i of fell) collapseTile(w, i);
-  io.to(w.code).emit('collapse', fell);
-  recomputeSupport(w);
 }
-function collapseTile(w, i) {
-  w.under[i] = U.RUBBLE;
-  w.cracks.delete(i);
-  w.tileQ.push([i, U.RUBBLE]);
+function collapseTile(w, l, i) {
+  w.grids[l][i] = U.RUBBLE;
+  w.cracks[l].delete(i);
+  w.tileQ.push([LC(l), i, U.RUBBLE]);
   const tx = i % UW, ty = (i / UW) | 0;
-  if (w.objs.u.has(i)) setObj(w, 'u', i, null);            // 置いてあった物は中身ごと消える
-  for (const it of [...w.items.values()]) if (it.layer === 'u' && Math.floor(it.x / T) === tx && Math.floor(it.y / T) === ty) removeGroundItem(w, it.id);
+  if (w.objs[l].has(i)) setObj(w, l, i, null);            // 置いてあった物は中身ごと消える
+  for (const it of [...w.items.values()]) if (it.layer === l && Math.floor(it.x / T) === tx && Math.floor(it.y / T) === ty) removeGroundItem(w, it.id);
   for (const p of Object.values(w.players)) {
-    if (!p.dead && p.layer === 'u' && circleHitsTile(p.x, p.y, PR * 0.7, tx, ty)) killPlayer(w, p, '崩落に巻き込まれた…', true);
+    if (!p.dead && p.layer === l && circleHitsTile(p.x, p.y, PR * 0.7, tx, ty)) killPlayer(w, p, '崩落に巻き込まれた…', true);
   }
+}
+// 下に掘る（地下1階→2階→3階）
+function handleDigDown(w, p) {
+  const l = p.layer;
+  const warn = t => { if (p.warnT <= 0) { msgTo(p, t); p.warnT = 3; } p.dig = null; };
+  if (!isUnder(l)) return warn('下に掘れるのは巣の中だけ');
+  if (l === 'u3') return warn('これより下は硬い岩盤で掘れない');
+  const g = w.grids[l], tx = Math.floor(p.x / T), ty = Math.floor(p.y / T), idx = ty * UW + tx;
+  if (g[idx] === U.STAIR_DN) return warn('もう穴が開いている。Fで降りよう');
+  if (g[idx] !== U.OPEN || w.objs[l].has(idx) || tx < 3 || ty < 3 || tx > UW - 4 || ty > UH - 4) return warn('何も置いていない床の上で下に掘ろう');
+  if (l === 'u' && Math.hypot(tx - UENT.tx, ty - UENT.ty) < 3) return warn('出入口のすぐ近くは掘れない');
+  const need = l === 'u' ? 2 : 3;
+  if (jawOf(p) < need) return warn(`地下${FLOOR_NO[l] + 1}階へ掘るには「${need === 2 ? '小石' : '甲殻'}の大あご」が必要`);
+  if (!p.dig || p.dig.idx !== idx || p.dig.kind !== 'down') p.dig = { idx, kind: 'down', prog: 0, hard: DIGDOWN_HARD };
+  p.dig.prog += JAW[jawOf(p)].dig * DT;
+  p.biteT = 0.1;
+  if (p.dig.prog < DIGDOWN_HARD) return;
+  p.dig = null;
+  const below = l === 'u' ? 'u2' : 'u3', gb = w.grids[below];
+  g[idx] = U.STAIR_DN; w.tileQ.push([LC(l), idx, U.STAIR_DN]);
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const j = (ty + dy) * UW + tx + dx;
+    if (gb[j] !== U.STAIR_UP && gb[j] !== U.STAIR_DN) { gb[j] = U.OPEN; w.tileQ.push([LC(below), j, U.OPEN]); }
+  }
+  gb[idx] = U.STAIR_UP; w.tileQ.push([LC(below), idx, U.STAIR_UP]);
+  recomputeSupport(w, l); recomputeSupport(w, below);
+  msg(w, `⛏ ${p.name}が地下${FLOOR_NO[below]}階への穴を掘った！（穴の上でFで降りる）`);
 }
 
 // ================= プレイヤー =================
@@ -763,11 +868,12 @@ function makePlayer(w, id, name) {
   const p = {
     id, name, color: COLORS[Object.keys(w.players).length % COLORS.length],
     layer: 'u', x: UCX * T, y: UCY * T, a: 0, hp: 100, hunger: 100, equip: newEquip(), slowT: 0, grab: null,
+    heat: 0, trap: null, immuneT: 0, lastMoveAt: Date.now(), ddown: false,
     inv: new Array(INV_SIZE).fill(null), sel: 0, dead: false, respawn: 0, bed: null, sleep: false,
     ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
   };
   if (s) {
-    Object.assign(p, { inv: s.inv, equip: s.equip || newEquip(), hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y, bed: s.bed || null });
+    Object.assign(p, { inv: s.inv, equip: Object.assign(newEquip(), s.equip || {}), hp: s.hp, hunger: s.hunger, layer: s.layer, x: s.x, y: s.y, bed: s.bed || null });
     if (s.respawnAtBed) { const b = bedPos(w, p); if (b) Object.assign(p, { layer: b.l, x: b.x, y: b.y }); }
   } else { addItem(p.inv, 'crumb', 5); }
   return p;
@@ -780,7 +886,7 @@ function killPlayer(w, p, why, buried) {
   if (p.dead) return;
   if (p.grab) releaseGrab(w, p);
   p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false; p.sleep = false;
-  if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), [...p.inv, p.equip.jaw, p.equip.armor]);
+  if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), [...p.inv, p.equip.jaw, p.equip.armor, p.equip.acc1, p.equip.acc2]);
   p.inv = new Array(INV_SIZE).fill(null);
   p.equip = newEquip();
   emitInv(p);
@@ -811,7 +917,7 @@ function canPlace(w, l, tx, ty, t) {
   if (l === 't') return false;
   if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return false;
   const idx = ty * LW(l) + tx, cx = (tx + 0.5) * T, cy = (ty + 0.5) * T;
-  if (l === 'u') { if (w.under[idx] !== U.OPEN) return false; }
+  if (isUnder(l)) { if (w.grids[l][idx] !== U.OPEN) return false; }
   else {
     if (inRock(w, cx, cy, 6)) return false;
     if (Math.hypot(cx - NEST.x, cy - NEST.y) < NEST.r + 24 || dist({ x: cx, y: cy }, w.townPos) < 60) return false;
@@ -835,7 +941,7 @@ function destroyObj(w, l, idx, byPlayer) {
     else give(w, byPlayer, o.t, 1);
     emitInv(byPlayer);
   } else if (!OBJ[o.t].natural) msg(w, `⚠ ${ITEMS[o.t].n}が壊された！`);
-  if (OBJ[o.t].support) recomputeSupport(w);
+  if (OBJ[o.t].support && isUnder(l)) recomputeSupport(w, l);
   if (byPlayer && OBJ[o.t].qs !== undefined) {
     const next = { clue: 1, cocoon: 4, clue3: 5, queenCocoon: 8 }[o.t];
     advanceQuest(w, next, byPlayer);
@@ -858,6 +964,11 @@ function handleHold(w, p) {
     if (Math.hypot(e.x - p.ax, e.y - p.ay) < r + 14 && Math.hypot(e.x - p.x, e.y - p.y) < REACH + r) {
       p.atkCd = 0.4; p.biteT = 0.15;
       e.hp -= jaw.atk; e.hitT = 0.15;
+      if (e.type === 'mantis') {                         // 攻撃されたカマキリは獲物を放す
+        e.revealT = 4;
+        const h = e.holding && w.players[e.holding];
+        if (h && h.trap && h.trap.kind === 'mantis') releaseTrap(w, h);
+      }
       if (e.type !== 'boss') { const k = Math.atan2(e.y - p.y, e.x - p.x); e.x += Math.cos(k) * 8; e.y += Math.sin(k) * 8; collide(w, e.layer, e, r * 0.8); }
       if (e.hp <= 0) killEnemy(w, e);
       p.dig = null;
@@ -877,12 +988,14 @@ function handleHold(w, p) {
       if (why) { if (p.warnT <= 0) { msgTo(p, why); p.warnT = 3; } p.dig = null; return; }
     }
     kind = 'o'; hard = OBJ[o.t].hp;
-  } else if (l === 'u') {                                   // 3) 地面
-    const info = TILE_INFO[w.under[idx]];
+  } else if (isUnder(l)) {                                  // 3) 地面
+    const info = TILE_INFO[w.grids[l][idx]];
     if (!info) { p.dig = null; return; }
     if (info.jaw && jawLv < info.jaw) { if (p.warnT <= 0) { msgTo(p, info.need); p.warnT = 3; } p.dig = null; return; }
     kind = 't'; hard = info.h;
-  } else {                                                  // 4) 草
+  } else if (inPuddle(w, p.ax, p.ay)) {                     // 4) 水たまりの水をくむ
+    kind = 'w'; hard = 5;
+  } else {                                                  // 5) 草
     const g = w.grass.get(idx);
     if (g === undefined || g < 2) { p.dig = null; return; }
     kind = 'g'; hard = 4;
@@ -893,11 +1006,12 @@ function handleHold(w, p) {
   if (p.dig.prog < hard) return;
   p.dig = null;
   if (kind === 'o') destroyObj(w, l, idx, p);
+  else if (kind === 'w') { give(w, p, 'water', 1); emitInv(p); }
   else if (kind === 't') {
-    for (const [id, n] of TILE_INFO[w.under[idx]].drop) give(w, p, id, n);
-    w.under[idx] = U.OPEN;
-    w.tileQ.push([idx, U.OPEN]);
-    recomputeSupport(w);
+    for (const [id, n] of TILE_INFO[w.grids[l][idx]].drop) give(w, p, id, n);
+    w.grids[l][idx] = U.OPEN;
+    w.tileQ.push([LC(l), idx, U.OPEN]);
+    recomputeSupport(w, l);
     emitInv(p);
   } else {
     const g = w.grass.get(idx);
@@ -911,7 +1025,10 @@ function handleHold(w, p) {
 function updatePlayers(w) {
   for (const p of Object.values(w.players)) {
     if (p.dead) { p.respawn -= DT; if (p.respawn <= 0) respawnPlayer(w, p); continue; }
-    p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT; p.slowT -= DT;
+    p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT; p.slowT -= DT; p.immuneT -= DT;
+    if (p.trap) { updateTrap(w, p); continue; }                 // つかまっている間はもがくだけ
+    updateOutdoor(w, p);
+    if (p.dead) continue;
     p.hunger -= (p.sleep ? 0.14 : 0.28) * DT;
     if (p.sleep) p.hp = Math.min(100, p.hp + 4 * DT);
     if (p.hunger <= 0) { p.hunger = 0; p.hp -= 3 * DT; }
@@ -930,7 +1047,8 @@ function updatePlayers(w) {
       }
     }
     if (changed) emitInv(p);
-    if (p.lmb && !p.grab) handleHold(w, p); else p.dig = null;
+    if (p.ddown && !p.grab) handleDigDown(w, p);
+    else if (p.lmb && !p.grab) handleHold(w, p); else p.dig = null;
     if (p.hp <= 0) killPlayer(w, p, p.hunger <= 0 ? '飢え死にした…' : '力尽きた…');
   }
 }
@@ -945,10 +1063,17 @@ function spawnEnemy(w, type, den, raider) {
   w.enemies.push(e);
   return e;
 }
-function killEnemy(w, e) {
+function killEnemy(w, e, eaten) {               // eaten: 軍隊アリに食べられた（何も落とさない）
   if (e.dead) return;
   e.dead = true;
   if (e.type === 'boss') { w.quest.bossDead = true; advanceQuest(w, 7, null); }
+  if (e.type === 'mantis') {
+    if (w.mantisSpots[e.spot]) w.mantisSpots[e.spot].back = w.day + 2;
+    const h = e.holding && w.players[e.holding];
+    if (h && h.trap && h.trap.kind === 'mantis') releaseTrap(w, h);
+    if (!eaten) msg(w, '🦗 カマキリを倒した！ 「カマキリの鎌」が手に入る');
+  }
+  if (eaten) return;
   for (const [id, a, b] of EN[e.type].drops) {
     const n = randi(a, b);
     for (let k = 0; k < n; k++) addGroundItem(w, { layer: e.layer, x: Math.round(e.x + rand(-12, 12)), y: Math.round(e.y + rand(-12, 12)), item: id, n: 1 });
@@ -959,6 +1084,7 @@ function updateEnemies(w) {
   for (const e of w.enemies) {
     if (e.dead) continue;
     if (e.type === 'boss') { if (e.hp <= 0) killEnemy(w, e); else updateBoss(w, e, alive); continue; }
+    if (e.type === 'mantis') { updateMantis(w, e, alive); continue; }
     const s = EN[e.type];
     e.atkCd -= DT; e.hitT -= DT; e.avoidT -= DT; e.life += DT;
     if (e.retreat && e.life > 400) { e.dead = true; continue; }
@@ -971,7 +1097,7 @@ function updateEnemies(w) {
     const q = w.queen, targets = q && q.state === 'follow' && q.faint <= 0 ? [...alive, q] : alive;
     let tgt = null, best = s.detect;
     if (!e.retreat) for (const p of targets) {
-      if (p.layer !== 's') continue;
+      if (p.layer !== 's' || p.trap || repelled(w, p.x, p.y)) continue;
       const d = dist(p, e);
       if (d < best) { best = d; tgt = p; }
     }
@@ -1001,6 +1127,10 @@ function updateEnemies(w) {
     e.a = ang;
     const ox = e.x, oy = e.y;
     e.x += Math.cos(ang) * mv * DT; e.y += Math.sin(ang) * mv * DT;
+    for (const r of w.repels) {                                // 刺激臭の中には入れない
+      const d = dist(e, r);
+      if (d < r.r && d > 0.1) { e.x = r.x + (e.x - r.x) / d * r.r; e.y = r.y + (e.y - r.y) / d * r.r; }
+    }
     const hit = collide(w, 's', e, s.r * 0.8);
     if (hit && tgt) {
       const hidx = hit.ty * SW + hit.tx, o = w.objs.s.get(hidx);
@@ -1264,6 +1394,237 @@ function updateHuman(w) {
   }
 }
 
+// ================= 外の危険 =================
+function sunInfo(w) {                       // 太陽の向き（影がのびる方向）と日差しの強さ
+  const r = clamp(w.time / DAY_LEN, 0, 1), ang = Math.PI * (1 - r);
+  return { dx: Math.cos(ang), dy: Math.sin(ang) * 0.5 + 0.35, len: 0.35 + Math.abs(r - 0.5) * 1.3, I: (w.isNight || w.rain > 0) ? 0 : Math.max(0, Math.sin(Math.PI * r)) };
+}
+function shadeAt(w, x, y) {                 // 上に何かあって、鳥と日差しから守られているか
+  for (const t of w.trees) if (Math.hypot(t.x - x, t.y - y) < t.r + 240) return true;
+  const sd = sunInfo(w);
+  for (const o of w.rocks) {
+    if (o.k || o.r < 26 || Math.abs(o.x - x) > o.r * 3 || Math.abs(o.y - y) > o.r * 3) continue;
+    if (Math.hypot(o.x + sd.dx * o.r * sd.len - x, o.y + sd.dy * o.r * sd.len - y) < o.r * 0.95) return true;
+  }
+  for (const d of w.deco) {
+    if (d.t === 'flower') continue;
+    if (Math.hypot(d.x + sd.dx * d.r * sd.len - x, d.y + sd.dy * d.r * sd.len - y) < d.r * 0.95) return true;
+  }
+  const tx = Math.floor(x / T), ty = Math.floor(y / T), g = w.grass.get(ty * SW + tx);
+  if (g !== undefined && g >= 2) return true;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const o = w.objs.s.get((ty + dy) * SW + tx + dx);
+    if (!o) continue;
+    const d2 = Math.hypot((tx + dx + 0.5) * T - x, (ty + dy + 0.5) * T - y);
+    if ((o.t === 'bigLeaf' && d2 < 46) || (o.t === 'shelter' && d2 < 60)) return true;
+  }
+  return false;
+}
+const inSafeZone = (x, y) => Math.hypot(x - NEST.x, y - NEST.y) < SAFE_R;
+const inPuddle = (w, x, y) => w.wet > 0.12 && w.puddles.some(q => Math.hypot(q.x - x, q.y - y) < q.r * w.wet - 4);
+const repelled = (w, x, y) => w.repels.some(r => Math.hypot(r.x - x, r.y - y) < r.r);
+function genHazards(w) {
+  const far = (x, y, pad) => x > 200 && y > 200 && x < SW * T - 200 && y < SH * T - 200 && Math.hypot(x - NEST.x, y - NEST.y) > SAFE_R + pad
+    && !inRock(w, x, y, 20) && dist({ x, y }, w.lair) > 520 && dist({ x, y }, w.townPos) > 320;
+  w.sand = []; w.pits = [];                  // 砂地とアリジゴク
+  for (let k = 0; k < 500 && w.sand.length < 12; k++) {
+    const x = rand(0, SW * T), y = rand(0, SH * T), r = rand(130, 210);
+    if (zoneOf(x, y) === 1 || !far(x, y, r) || w.sand.some(s => Math.hypot(s.x - x, s.y - y) < s.r + r + 120)) continue;
+    w.sand.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
+    for (let j = randi(1, 2); j > 0; j--) {
+      const a = rand(0, 6.28), d = rand(0, r * 0.45), px = x + Math.cos(a) * d, py = y + Math.sin(a) * d;
+      if (!inRock(w, px, py, 75) && !inPit(w, px, py, 130)) w.pits.push({ id: w.nextId++, x: Math.round(px), y: Math.round(py), r: 70 });
+    }
+  }
+  w.puddles = [];                            // 雨が降るとできる水たまり（くぼみ）
+  for (let k = 0; k < 500 && w.puddles.length < 26; k++) {
+    const x = rand(150, SW * T - 150), y = rand(150, SH * T - 150), r = rand(55, 120);
+    if (Math.hypot(x - NEST.x, y - NEST.y) < 160 + r || inRock(w, x, y, r * 0.6) || w.sand.some(sd => Math.hypot(sd.x - x, sd.y - y) < sd.r + r) || dist({ x, y }, w.townPos) < 200 || w.puddles.some(q => Math.hypot(q.x - x, q.y - y) < q.r + r + 60)) continue;
+    w.puddles.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
+  }
+  w.mantisSpots = [];                        // 草むらにひそむカマキリ
+  const cells = [...w.grass.keys()].filter(i => { const x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T; return zoneOf(x, y) >= 2 && far(x, y, 0); });
+  for (let k = 0; k < 300 && w.mantisSpots.length < 10 && cells.length; k++) {
+    const i = cells[randi(0, cells.length - 1)], x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T;
+    if (w.mantisSpots.some(m => Math.hypot(m.x - x, m.y - y) < 600)) continue;
+    w.mantisSpots.push({ x: Math.round(x), y: Math.round(y), back: 0 });
+  }
+}
+function spawnMantises(w) {
+  w.mantisSpots.forEach((m, i) => {
+    if (m.back > w.day || w.enemies.some(e => e.type === 'mantis' && e.spot === i)) return;
+    const e = spawnEnemy(w, 'mantis', m, false);
+    Object.assign(e, { x: m.x, y: m.y, spot: i, holding: null, revealT: 0 });
+  });
+}
+function safeTp(w, p, x, y) { const pos = { x, y }; collide(w, p.layer, pos, PR); teleport(p, p.layer, pos.x, pos.y); }
+function setTrap(w, p, tr) {
+  if (p.grab) releaseGrab(w, p);
+  p.trap = { n: 0, ...tr }; p.lmb = false; p.dig = null; p.sleep = false;
+  if (tr.x !== undefined) teleport(p, p.layer, tr.x, tr.y);
+}
+function releaseTrap(w, p) {
+  const tr = p.trap;
+  if (!tr) return;
+  p.trap = null; p.immuneT = 2.5;
+  if (tr.kind === 'pit') {
+    const pit = w.pits.find(x => x.id === tr.pid);
+    if (pit) {                                                 // 岩などに押し戻されない向きを探して、すり鉢の外へ
+      let best = null;
+      for (let k = 0; k < 12 && !best; k++) {
+        const a = rand(0, 6.28), pos = { x: clamp(pit.x + Math.cos(a) * (pit.r + 22), 40, SW * T - 40), y: clamp(pit.y + Math.sin(a) * (pit.r + 22), 40, SH * T - 40) };
+        collide(w, 's', pos, PR);
+        if (!inPit(w, pos.x, pos.y, 4)) best = pos;
+      }
+      if (best) teleport(p, 's', best.x, best.y); else p.immuneT = 6;
+    }
+    msgTo(p, '🕳 アリジゴクの巣から這い上がった！');
+  } else if (tr.kind === 'mantis') {
+    const e = w.enemies.find(x => x.id === tr.eid);
+    if (e) { e.holding = null; e.atkCd = 4; const a = Math.atan2(p.y - e.y, p.x - e.x); safeTp(w, p, e.x + Math.cos(a) * 95, e.y + Math.sin(a) * 95); }
+    msgTo(p, '🦗 カマキリから逃げ出した！');
+  } else if (tr.kind === 'bird') {
+    p.hp -= 20 * (1 - armorOf(p));
+    safeTp(w, p, clamp(p.x, 40, SW * T - 40), clamp(p.y, 40, SH * T - 40));
+    if (w.bird) { w.bird.st = 'leave'; w.bird.t = 2; }
+    msg(w, `🐦 ${p.name}が鳥を振りほどいて地面に落ちた！`);
+    if (p.hp <= 0) killPlayer(w, p, '落ちたときの衝撃で力尽きた…');
+  }
+}
+function updateTrap(w, p) {
+  const tr = p.trap;
+  if (tr.kind === 'pit') {
+    p.hp -= 7 * DT * (1 - armorOf(p));
+    if (p.hp <= 0) { p.trap = null; killPlayer(w, p, 'アリジゴクに食べられた…'); }
+  } else if (tr.kind === 'mantis') {
+    const e = w.enemies.find(x => x.id === tr.eid);
+    if (!e || e.dead) { releaseTrap(w, p); return; }
+    p.hp -= 10 * DT * (1 - armorOf(p));
+    if (p.hp <= 0) { p.trap = null; killPlayer(w, p, 'カマキリに食べられた…'); }
+  } else if (tr.kind === 'bird') {
+    tr.t -= DT;
+    if (tr.t <= 0) {
+      p.x = tr.gx; p.y = tr.gy; p.trap = null;
+      killPlayer(w, p, '鳥にさらわれた…');
+      if (w.bird) { w.bird.st = 'leave'; w.bird.t = 2; }
+    }
+  }
+}
+function updateMantis(w, e, alive) {
+  e.hitT -= DT; e.atkCd -= DT; e.revealT -= DT;
+  if (e.hp <= 0) { killEnemy(w, e); return; }
+  const h = e.holding && w.players[e.holding];
+  if (h) {
+    if (h.dead || !h.trap || h.trap.kind !== 'mantis') { e.holding = null; e.atkCd = 3; }
+    return;
+  }
+  if (e.atkCd > 0) return;
+  for (const p of alive) {
+    if (p.layer !== 's' || p.trap || p.immuneT > 0 || p.sleep || dist(p, e) > 62) continue;
+    e.holding = p.id; e.revealT = 5; e.a = Math.atan2(p.y - e.y, p.x - e.x);
+    setTrap(w, p, { kind: 'mantis', need: 14, eid: e.id, x: e.x + Math.cos(e.a) * 26, y: e.y + Math.sin(e.a) * 26 });
+    msg(w, `🦗 ${p.name}がカマキリにつかまった！ スペース連打で逃げろ！ 仲間はカマキリを攻撃して助けろ！`);
+    return;
+  }
+}
+// ---- 鳥 ----
+function updateBird(w) {
+  const sunny = !w.isNight && w.rain <= 0 && w.time > 15 && w.time < DAY_LEN - 15;
+  const b = w.bird;
+  if (!b) {
+    w.birdCd -= DT;
+    if (!sunny || w.birdCd > 0) return;
+    const cands = Object.values(w.players).filter(p => !p.dead && p.layer === 's' && !p.trap && !inSafeZone(p.x, p.y) && dist(p, w.townPos) > 120);
+    if (!cands.length) { w.birdCd = 4; return; }
+    const tgt = cands[randi(0, cands.length - 1)];
+    w.bird = { st: 'circle', t: 5, tid: tgt.id, x: tgt.x + 180, y: tgt.y, a: 0 };
+    w.birdCd = zoneOf(tgt.x, tgt.y) === 3 ? rand(25, 45) : rand(40, 70);
+    msg(w, `🐦 空に大きな鳥の影！ ${tgt.name}が狙われている！ 石の影・草むら・木の下に隠れろ！`);
+    return;
+  }
+  const tgt = w.players[b.tid];
+  if (b.st === 'circle') {
+    b.t -= DT;
+    if (!tgt || tgt.dead || tgt.layer !== 's') { b.st = 'leave'; b.t = 2.5; return; }
+    b.a += DT * 2.2;
+    b.x = tgt.x + Math.cos(b.a) * 170 * (b.t / 5 + 0.3); b.y = tgt.y + Math.sin(b.a) * 110 * (b.t / 5 + 0.3);
+    if (b.t <= 0) { b.st = 'dive'; b.t = 0.9; }
+  } else if (b.st === 'dive') {
+    b.t -= DT;
+    if (!tgt || tgt.dead || tgt.layer !== 's') { b.st = 'leave'; b.t = 2.5; return; }
+    const k = Math.min(1, DT * 6); b.x += (tgt.x - b.x) * k; b.y += (tgt.y - b.y) * k;
+    if (b.t > 0) return;
+    const hidden = shadeAt(w, tgt.x, tgt.y) || inSafeZone(tgt.x, tgt.y) || (hasAcc(tgt, 'cloak') && Date.now() - tgt.lastMoveAt > 700);
+    if (hidden || tgt.trap || tgt.immuneT > 0) { msg(w, `🐦 鳥は${tgt.name}を見失って飛んでいった`); b.st = 'leave'; b.t = 2.5; return; }
+    setTrap(w, tgt, { kind: 'bird', need: 12, t: 3, gx: tgt.x, gy: tgt.y });
+    b.st = 'carry'; b.ang = rand(0, 6.28);
+    msg(w, `🐦 ${tgt.name}が鳥につかまった！ スペース連打で振りほどけ！`);
+  } else if (b.st === 'carry') {
+    b.x += Math.cos(b.ang) * 150 * DT; b.y += Math.sin(b.ang) * 150 * DT;
+    if (tgt && tgt.trap && tgt.trap.kind === 'bird') { tgt.x = clamp(b.x, 20, SW * T - 20); tgt.y = clamp(b.y, 20, SH * T - 20); }
+    else { b.st = 'leave'; b.t = 2.5; }
+  } else {
+    b.x += 260 * DT; b.y -= 120 * DT; b.t -= DT;
+    if (b.t <= 0) w.bird = null;
+  }
+}
+// ---- 軍隊アリの大行進 ----
+function startArmy(w) {
+  const axis = Math.random() < 0.5 ? 'x' : 'y', dir = Math.random() < 0.5 ? 1 : -1, max = axis === 'x' ? SW * T : SH * T;
+  w.army = { axis, dir, pos: dir > 0 ? -250 : max + 250, speed: 85, warn: 15, max };
+  msg(w, '🐜 遠くから地鳴り…赤い軍隊アリの大行進が来る！ 巣に逃げるか「刺激臭の玉」で身を守れ！');
+  io.to(w.code).emit('armyCome');
+}
+function updateArmy(w) {
+  const a = w.army;
+  if (!a) return;
+  if (a.warn > 0) { a.warn -= DT; return; }
+  a.pos += a.dir * a.speed * DT;
+  const inBand = (x, y) => Math.abs((a.axis === 'x' ? x : y) - a.pos) < 130;
+  for (const p of Object.values(w.players)) {
+    if (p.dead || p.layer !== 's' || !inBand(p.x, p.y) || repelled(w, p.x, p.y)) continue;
+    p.hp -= 18 * DT * (1 - armorOf(p)); wake(p);
+    if (p.warnT <= 0) { msgTo(p, '⚠ 軍隊アリに噛まれている！ 列から逃げろ！'); p.warnT = 3; }
+    if (p.hp <= 0) killPlayer(w, p, '軍隊アリの大行進に飲み込まれた…');
+  }
+  for (const e of w.enemies) if (e.type !== 'boss' && e.layer === 's' && inBand(e.x, e.y) && !repelled(w, e.x, e.y)) killEnemy(w, e, true);
+  w.enemies = w.enemies.filter(e => !e.dead);
+  if (w.tickN % 15 === 0) {                  // 食べ物・置いた物・草を食い荒らす
+    for (const it of [...w.items.values()]) if (it.layer === 's' && !it.bag && ITEMS[it.item].food && inBand(it.x, it.y) && !repelled(w, it.x, it.y)) removeGroundItem(w, it.id);
+    for (const [i, o] of [...w.objs.s]) {
+      if (OBJ[o.t].natural || OBJ[o.t].fixed) continue;
+      const x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T;
+      if (inBand(x, y) && !repelled(w, x, y)) damageObj(w, 's', i, 8);
+    }
+    for (const [i, g] of w.grass) if (g > 0 && inBand((i % SW + 0.5) * T, (Math.floor(i / SW) + 0.5) * T)) { w.grass.set(i, 0); w.grassQ.push([i, 0]); }
+  }
+  if ((a.dir > 0 && a.pos > a.max + 250) || (a.dir < 0 && a.pos < -250)) {
+    w.army = null; w.nextArmy = w.day + randi(4, 6); w.armyAt = rand(20, 120);
+    msg(w, '軍隊アリの行進が通り過ぎていった…');
+  }
+}
+// ---- 毎フレームの外の危険（暑さ・水たまり・アリジゴク） ----
+function updateOutdoor(w, p) {
+  if (p.layer !== 's') { p.heat = Math.max(0, p.heat - 8 * DT); return; }
+  const sun = sunInfo(w), wet = inPuddle(w, p.x, p.y);
+  if (sun.I > 0.25 && !wet && !shadeAt(w, p.x, p.y)) p.heat += 3.4 * sun.I * (hasAcc(p, 'parasol') ? 0.35 : 1) * DT;
+  else p.heat -= 7 * DT;
+  p.heat = clamp(p.heat, 0, 100);
+  if (p.heat >= 100) { p.hp -= 4 * DT; if (p.warnT <= 0) { msgTo(p, '🥵 暑すぎる！ 日陰に入るか、水を飲もう'); p.warnT = 4; } if (p.hp <= 0) return killPlayer(w, p, '暑さで倒れた…'); }
+  if (wet && !hasAcc(p, 'floater')) {
+    p.hp -= 5 * DT;
+    if (p.warnT <= 0) { msgTo(p, '💧 溺れそう！ 水たまりから出ろ！'); p.warnT = 3; }
+    if (p.hp <= 0) return killPlayer(w, p, '水たまりで溺れた…');
+  }
+  if (!p.trap && p.immuneT <= 0) for (const pit of w.pits) {
+    if (Math.abs(pit.x - p.x) < 20 && Math.abs(pit.y - p.y) < 20 && dist(pit, p) < 18) {
+      setTrap(w, p, { kind: 'pit', need: 10, pid: pit.id, x: pit.x, y: pit.y });
+      msg(w, `🕳 ${p.name}がアリジゴクにつかまった！ スペース連打で這い上がれ！（仲間は「糸のロープ」で助けられる）`);
+      break;
+    }
+  }
+}
+
 // ================= 環境（昼夜・雨・草・資源・湧き） =================
 function sideErrand(w) {
   const q = w.quest;
@@ -1284,12 +1645,18 @@ function updateEnv(w) {
     w.isNight = false; w.time = 0; w.day++;
     for (const e of w.enemies) if (e.raider) e.retreat = true;
     for (const p of Object.values(w.players)) wake(p);
-    spawnNodes(w); spawnCubes(w);
+    spawnNodes(w); spawnCubes(w); spawnMantises(w);
     if (w.prints.length) { w.prints = []; io.to(w.code).emit('prints', []); }
     msg(w, `☀ ${w.day}日目の朝。モンスターが巣穴へ帰っていく${w.day === w.nextHuman ? '…今日は地面が少し揺れている気がする' : ''}`);
   }
   if (w.rain > 0) { w.rain -= DT; if (w.rain <= 0) msg(w, '雨がやんだ'); }
-  if (!w.isNight && !w.human && w.day >= w.nextHuman && w.time >= w.humanAt && w.time < DAY_LEN - 40) startHuman(w);
+  w.wet = clamp(w.wet + (w.rain > 0 ? DT / 12 : -DT / 70), 0, 1);       // 雨で水たまりが広がる
+  for (const r of w.repels) r.t -= DT;
+  w.repels = w.repels.filter(r => r.t > 0);
+  updateBird(w);
+  if (!w.army && !w.human && !w.isNight && w.day >= w.nextArmy && w.time >= w.armyAt && w.time < DAY_LEN - 60) startArmy(w);
+  updateArmy(w);
+  if (!w.isNight && !w.human && !w.army && w.day >= w.nextHuman && w.time >= w.humanAt && w.time < DAY_LEN - 40) startHuman(w);
   updateHuman(w);
 
   w.secT -= DT;
@@ -1307,7 +1674,7 @@ function updateEnv(w) {
     const raiders = w.enemies.filter(e => e.raider && !e.retreat).length;
     if (raiders < cap && Math.random() < 0.6) spawnEnemy(w, Math.random() < Math.min(0.5, 0.15 + w.day * 0.04) ? 'beetle' : 'spider', w.dens[randi(0, w.dens.length - 1)], true);
   }
-  if (w.enemies.filter(e => !e.raider && e.home !== w.lair).length < 8 && Math.random() < 0.2) {
+  if (w.enemies.filter(e => !e.raider && e.home !== w.lair && e.type !== 'mantis').length < 8 && Math.random() < 0.2) {
     const far = w.dens.filter(d => zoneOf(d.x, d.y) === 3), list = far.length ? far : w.dens;
     spawnEnemy(w, Math.random() < 0.4 ? 'beetle' : 'spider', list[randi(0, list.length - 1)], false);
   }
@@ -1322,10 +1689,15 @@ function broadcast(w) {
       Math.round(p.hp), Math.round(p.hunger), p.dead ? 1 : 0, Math.ceil(p.respawn), p.biteT > 0 ? 1 : 0,
       p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, jawOf(p), armorOf(p),
       p.sleep ? 1 : 0, p.slowT > 0 ? 1 : 0, p.grab || 0,
+      p.trap ? { pit: 1, mantis: 2, bird: 3 }[p.trap.kind] : 0, p.trap ? +(p.trap.n / p.trap.need).toFixed(2) : 0, Math.round(p.heat), p.immuneT > 0 ? 1 : 0,
     ]),
-    e: w.enemies.map(e => [e.id, EN[e.type].idx, LC(e.layer), Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0]),
+    e: w.enemies.map(e => [e.id, EN[e.type].idx, LC(e.layer), Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0, e.type !== 'mantis' || e.holding || e.revealT > 0 ? 1 : 0]),
+    b: w.bird ? [['circle', 'dive', 'carry', 'leave'].indexOf(w.bird.st), Math.round(w.bird.x), Math.round(w.bird.y), w.bird.tid] : null,
+    ar: w.army ? [w.army.axis === 'x' ? 0 : 1, w.army.dir, Math.round(w.army.pos), Math.ceil(w.army.warn)] : null,
+    rp: w.repels.map(r => [r.x, r.y, r.r, Math.ceil(r.t)]),
+    wet: +w.wet.toFixed(2),
     cb: w.cubes.map(c => [c.id, Math.round(c.x), Math.round(c.y), c.grab.length]),
-    k: [...w.cracks].map(([i, t2]) => [i, +t2.toFixed(1)]),
+    k: UL.flatMap(l => [...w.cracks[l]].map(([i, t2]) => [LC(l), i, +t2.toFixed(1)])),
     c: [w.day, +w.time.toFixed(1), w.isNight ? 1 : 0, w.rain > 0 ? 1 : 0, w.skipping ? 1 : 0],
     q: [w.quest.stage, t ? LC(t.l) : -1, t ? Math.round(t.x) : 0, t ? Math.round(t.y) : 0, w.quest.bossDead ? 1 : 0, w.quest.baitN],
     qn: w.queen ? [Math.round(w.queen.x), Math.round(w.queen.y), LC(w.queen.layer), ['captive', 'follow', 'home'].indexOf(w.queen.state), Math.round(w.queen.hp / 2), w.queen.faint > 0 ? 1 : 0, +(w.queen.a || 0).toFixed(2)] : null,
@@ -1360,14 +1732,15 @@ function fullSync(w, p) {
     code: w.code, me: p.id, worldName: w.name,
     defs: {
       T, SW, SH, UW, UH, TW, TH, NEST, UENT, TEXIT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, JAW, DAY_LEN, NIGHT_LEN,
-      INV_SIZE, HOTBAR, CHEST_SIZE, SUPPORT_RANGE, CUBE_R, DRAG: [42, 34, 130], SHOP_BUY, SELL, GACHA_COST, BET_AMOUNTS,
+      INV_SIZE, HOTBAR, CHEST_SIZE, SUPPORT_RANGE, CUBE_R, DRAG: [42, 34, 130], SHOP_BUY, SELL, GACHA_COST, BET_AMOUNTS, SAFE_R, ACC_INFO,
     },
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'), town: Buffer.from(TOWN_GRID).toString('base64'),
-    objs: { s: ob('s'), u: ob('u'), t: ob('t') },
+    under2: Buffer.from(w.grids.u2).toString('base64'), under3: Buffer.from(w.grids.u3).toString('base64'),
+    objs: { s: ob('s'), u: ob('u'), t: ob('t'), u2: ob('u2'), u3: ob('u3') },
     items: [...w.items.values()].map(compactItem),
     cubes: w.cubes.map(c => [c.id, Math.round(c.x), Math.round(c.y), c.grab.length]),
-    prints: w.prints,
+    prints: w.prints, sand: w.sand, pits: w.pits, puddles: w.puddles,
     you: { l: p.layer, x: p.x, y: p.y, s: p.tpSeq },
     lair: w.lair, townPos: w.townPos, bait: w.quest.pts.bait,
     quest: { stage: w.quest.stage, clearDay: w.quest.clearDay },
@@ -1430,6 +1803,7 @@ io.on('connection', socket => {
     online.set(a._id, socket.id);
     socket.data.user = a._id;
     socket.emit('loggedIn', { name: a.name, token });
+    sendAccBackup(a);
     sendLobby(socket);
     for (const fk of a.followers || []) refreshLobbyOf(fk);
   };
@@ -1473,6 +1847,40 @@ io.on('connection', socket => {
   });
   socket.on('lobby', () => { if (socket.data.user) sendLobby(socket); });
 
+  // ---------- ブラウザのバックアップから復元 ----------
+  socket.on('restoreAccount', async (d = {}) => {
+    try {
+      if (typeof d.s !== 'string' || d.s.length > 2e5 || signStr(d.s) !== d.sig) return socket.emit('authFail', { reason: 'noAccount', persistent: !!mongoCol });
+      const a = JSON.parse(d.s);
+      if (!a || !a._id || !a.salt || !a.hash || a._id !== accKey(a.name)) return;
+      const cur = await accGet(a._id);
+      const acc = cur || a;
+      if (!cur) { await accPut(a); console.log('アカウントをブラウザのバックアップから復元', a._id); }
+      if (d.token && (acc.tokens || []).includes(sha(d.token))) { socket.emit('info', 'この端末に残っていたデータからアカウントを復元しました'); loginOK(acc, null); }
+      else socket.emit('authFail', { reason: 'badToken', name: acc.name });
+    } catch (e) { console.error('restoreAccount', e.message); }
+  });
+  socket.on('restoreWorld', async (d = {}) => {
+    try {
+      const a = await accGet(socket.data.user);
+      if (!a || typeof d.s !== 'string' || signStr(d.s) !== d.sig) return socket.emit('err', 'バックアップが壊れていて復元できません');
+      const data = JSON.parse(d.s), code = String(data.code || '');
+      if (!code || !data.under) return;
+      const member = data.owner === a._id || Object.keys(data.saved || {}).map(accKey).includes(a._id);
+      if (!member) return socket.emit('err', 'このワールドのバックアップは復元できません');
+      if ((a.deleted || []).includes(code)) return socket.emit(d.silent ? 'wbDrop' : 'err', d.silent ? { code } : 'このワールドは削除されています');
+      if (data.owner === a._id && !a.worlds.some(x => x.code === code)) {          // 一覧から消えていたら戻す
+        if (a.worlds.length >= MAX_WORLDS) return d.silent ? null : socket.emit('err', `ワールドは${MAX_WORLDS}つまで。1つ削除してから復元してね`);
+        a.worlds.push({ code, name: String(data.name || 'ワールド').slice(0, 20) }); await accPut(a);
+      }
+      if (!rooms[code]) {
+        const cur = await dbLoad(code).catch(() => null);
+        if (!cur || (cur.savedAt || 0) < (data.savedAt || 0)) { await dbSave(code, data); console.log('ワールドをブラウザのバックアップから復元', code); }
+      }
+      if (d.silent) sendLobby(socket); else socket.emit('worldRestored', { code });
+    } catch (e) { console.error('restoreWorld', e.message); socket.emit('err', '復元に失敗しました'); }
+  });
+
   // ---------- ワールド ----------
   socket.on('createWorld', async (d = {}) => {
     const a = await accGet(socket.data.user); if (!a) return;
@@ -1482,7 +1890,9 @@ io.on('connection', socket => {
     do { code = crypto.randomBytes(5).toString('hex'); } while (rooms[code] || await dbLoad(code).catch(() => null));
     const w = createWorld(code);
     w.owner = a._id; w.name = name;
-    await dbSave(code, serialize(w));
+    const data = serialize(w);
+    await dbSave(code, data);
+    socket.emit('backup', makeBackup(w, data));
     a.worlds.push({ code, name });
     await accPut(a);
     sendLobby(socket);
@@ -1500,6 +1910,7 @@ io.on('connection', socket => {
     }
     await dbDelete(d.code).catch(() => {});
     a.worlds = a.worlds.filter(x => x.code !== d.code);
+    a.deleted = [...(a.deleted || []), d.code].slice(-30);           // バックアップから生き返らないように
     await accPut(a);
     sendLobby(socket);
   });
@@ -1511,7 +1922,7 @@ io.on('connection', socket => {
     try {
       const code = String(d.code || '');
       const w = await getWorld(code);
-      if (!w) return socket.emit('err', 'そのワールドは見つかりません');
+      if (!w) return socket.emit('worldMissing', { code });       // ブラウザのバックアップから戻せるか聞く
       if (!(await canJoin(a, w))) return socket.emit('err', 'お互いにフレンド登録すると参加できます');
       leaveWorld(socket);
       const p = makePlayer(w, socket.id, a.name);
@@ -1555,8 +1966,8 @@ io.on('connection', socket => {
   socket.on('p', d => {
     const c = ctx(); if (!c || !d) return;
     const { w, p } = c;
-    p.ax = +d.ax || 0; p.ay = +d.ay || 0; p.lmb = !!d.l && !p.sleep;
-    if (p.dead || p.sleep || d.s !== p.tpSeq) return;
+    p.ax = +d.ax || 0; p.ay = +d.ay || 0; p.lmb = !!d.l && !p.sleep && !p.trap; p.ddown = !!d.dd && !p.sleep && !p.trap;
+    if (p.dead || p.sleep || p.trap || d.s !== p.tpSeq) return;
     const x = +d.x, y = +d.y;
     if (!isFinite(x) || !isFinite(y)) return;
     const now = Date.now(), el = Math.min(0.5, (now - p.lastPos) / 1000);
@@ -1565,6 +1976,7 @@ io.on('connection', socket => {
     const tmp = { x, y };
     collide(w, p.layer, tmp, PR - 1);
     if (Math.hypot(tmp.x - x, tmp.y - y) > 6) { teleport(p, p.layer, tmp.x, tmp.y); return; }
+    if (Math.hypot(tmp.x - p.x, tmp.y - p.y) > 1.5) p.lastMoveAt = now;
     p.x = tmp.x; p.y = tmp.y; p.a = +d.a || 0;
   });
   socket.on('sel', i => { const c = ctx(); if (c && i >= 0 && i < HOTBAR) c.p.sel = i | 0; });
@@ -1575,6 +1987,9 @@ io.on('connection', socket => {
     const { w, p } = c;
     const x = +d.x, y = +d.y;
     if (!isFinite(x) || !isFinite(y)) return;
+    const held = p.inv[p.sel];
+    if (held && ITEMS[held.id].tool) { useTool(w, p, held); return; }
+    if (p.trap) return;
     if (p.grab) { releaseGrab(w, p); return; }                    // 角砂糖を離す
     if (p.layer === 's') {                                        // 角砂糖をつかむ
       const cube = w.cubes.find(cb => Math.hypot(cb.x - x, cb.y - y) < CUBE_R + 26 && dist(cb, p) < CUBE_R + PR + 50);
@@ -1622,14 +2037,45 @@ io.on('connection', socket => {
       if (def.place === 'chest') no.items = new Array(CHEST_SIZE).fill(null);
       removeItem(p.inv, s.id, 1);
       setObj(w, l, idx, no);
-      if (OBJ[def.place].support) recomputeSupport(w);
+      if (OBJ[def.place].support && isUnder(l)) recomputeSupport(w, l);
       emitInv(p);
     }
   });
+  function useTool(w, p, held) {
+    const kind = ITEMS[held.id].tool;
+    if (kind === 'rope') {                                      // 糸のロープ：つかまった仲間（自分）を助ける
+      const near = Object.values(w.players).filter(q => !q.dead && q.layer === p.layer && q.trap && q.trap.kind !== 'bird' && dist(q, p) < 120);
+      if (near.length) {
+        removeItem(p.inv, held.id, 1); emitInv(p);
+        for (const q of near) { releaseTrap(w, q); msg(w, q === p ? `🪢 ${p.name}が糸のロープで自力で抜け出した！` : `🪢 ${p.name}が糸のロープで${q.name}を助け出した！`); }
+        return;
+      }
+      if (p.layer === 's' && w.pits.some(pit => dist(pit, p) < pit.r + 6)) {
+        removeItem(p.inv, held.id, 1); emitInv(p); p.immuneT = 5;
+        msgTo(p, '🪢 ロープで体を固定した。すべり落ちない！');
+        return;
+      }
+      return msgTo(p, 'ロープはアリジゴクやカマキリにつかまったときに使おう');
+    }
+    if (kind === 'repel' && !p.trap) {                          // 刺激臭の玉：敵と軍隊アリが近づけない
+      if (p.layer !== 's') return msgTo(p, '外で使おう');
+      removeItem(p.inv, held.id, 1); emitInv(p);
+      w.repels.push({ x: Math.round(p.x), y: Math.round(p.y), r: 110, t: 25 });
+      msg(w, `💨 ${p.name}が刺激臭の玉を割った！ しばらく敵が近づけない`);
+    }
+  }
+  socket.on('mash', () => {                                     // スペース連打でもがく
+    const c = ctx(); if (!c || !c.p.trap) return;
+    const now = Date.now();
+    if (now - (c.p.lastMash || 0) < 45) return;
+    c.p.lastMash = now;
+    if (++c.p.trap.n >= c.p.trap.need) releaseTrap(c.w, c.p);
+  });
   function eat(p) {
     const s = p.inv[p.sel];
-    if (!s || !ITEMS[s.id].food || p.hunger >= 99.5) return;
+    if (!s || !ITEMS[s.id].food || (p.hunger >= 99.5 && !ITEMS[s.id].cool)) return;
     p.hunger = Math.min(100, p.hunger + ITEMS[s.id].food);
+    if (ITEMS[s.id].cool) { p.heat = Math.max(0, p.heat - ITEMS[s.id].cool); msgTo(p, '💧 水を飲んで体が冷えた'); }
     s.n--; if (!s.n) p.inv[p.sel] = null;
     emitInv(p);
   }
@@ -1642,8 +2088,9 @@ io.on('connection', socket => {
     if (r.bench && !nearObj(w, p, ['bench'])) { msgTo(p, '作業台の近くでないと作れない'); return; }
     if (!hasAll(p.inv, r.cost)) return;
     for (const id in r.cost) removeItem(p.inv, id, r.cost[id]);
-    const slot = equipSlotOf(r.out);
-    if (slot && !p.equip[slot]) { p.equip[slot] = { id: r.out, n: 1 }; msgTo(p, `${ITEMS[r.out].n}を装備した`); }
+    let slot = equipSlotOf(r.out);
+    if (slot === 'acc') slot = !p.equip.acc1 ? 'acc1' : !p.equip.acc2 ? 'acc2' : null;
+    if (slot && !p.equip[slot]) { p.equip[slot] = { id: r.out, n: 1 }; msgTo(p, `${ITEMS[r.out].n}を装備した`); }   // 空いていれば自動で装備
     else give(w, p, r.out, r.n);
     emitInv(p);
   });
@@ -1672,7 +2119,7 @@ io.on('connection', socket => {
   socket.on('equip', d => {
     const c = ctx(); if (!c || !d || c.p.dead) return;
     const { p } = c;
-    if (d.unequip === 'jaw' || d.unequip === 'armor') {
+    if (['jaw', 'armor', 'acc1', 'acc2'].includes(d.unequip)) {
       const cur = p.equip[d.unequip];
       if (!cur) return;
       if (addItem(p.inv, cur.id, 1)) { msgTo(p, '持ち物がいっぱいで外せない'); return; }
@@ -1680,8 +2127,12 @@ io.on('connection', socket => {
     } else {
       const i = d.slot | 0, s = p.inv[i];
       if (!s) return;
-      const slot = equipSlotOf(s.id);
+      let slot = equipSlotOf(s.id);
       if (!slot) return;
+      if (slot === 'acc') {
+        if (hasAcc(p, s.id)) return msgTo(p, 'もう同じ物を装備している');
+        slot = d.to === 'acc2' || (p.equip.acc1 && !p.equip.acc2) ? 'acc2' : 'acc1';
+      }
       const old = p.equip[slot];
       p.equip[slot] = { id: s.id, n: 1 };
       p.inv[i] = old;
@@ -1713,12 +2164,27 @@ io.on('connection', socket => {
     io.to(w.code).emit('chest', { l: oc.l, i: oc.idx, items: o.items, update: 1 });
   });
   socket.on('enter', () => {
-    const c = ctx(); if (!c || c.p.dead || c.p.sleep) return;
+    const c = ctx(); if (!c || c.p.dead || c.p.sleep || c.p.trap) return;
     const { w, p } = c;
     if (p.grab) releaseGrab(w, p);
     if (p.layer === 's' && dist(p, NEST) < NEST.r + 30) teleport(p, 'u', UENT_X, UENT_Y);
     else if (p.layer === 's' && dist(p, w.townPos) < 60) { teleport(p, 't', TSPAWN.x, TSPAWN.y); msgTo(p, '🏮 アリ商店街へようこそ！'); }
-    else if (p.layer === 'u' && Math.hypot(p.x - UENT_X, p.y - UENT_Y) < T * 1.3) teleport(p, 's', NEST.x, NEST.y + NEST.r + 14);
+    else if (isUnder(p.layer)) {                                  // 出入口・階段（いちばん近いもの）
+      let best = null, bd = T * 1.3;
+      if (p.layer === 'u') { const d = Math.hypot(p.x - UENT_X, p.y - UENT_Y); if (d < bd) { bd = d; best = { out: 1 }; } }
+      const g = w.grids[p.layer], ptx = Math.floor(p.x / T), pty = Math.floor(p.y / T);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const tx = ptx + dx, ty = pty + dy, v = g[ty * UW + tx];
+        if (v !== U.STAIR_DN && v !== U.STAIR_UP) continue;
+        const d = Math.hypot((tx + 0.5) * T - p.x, (ty + 0.5) * T - p.y);
+        if (d < bd) { bd = d; best = { tx, ty, v }; }
+      }
+      if (!best) return;
+      if (best.out) { teleport(p, 's', NEST.x, NEST.y + NEST.r + 14); return; }
+      const to = UL[UL.indexOf(p.layer) + (best.v === U.STAIR_DN ? 1 : -1)];
+      teleport(p, to, (best.tx + 0.5) * T, (best.ty + 0.5) * T);
+      msgTo(p, `地下${FLOOR_NO[to]}階${to === 'u' ? '（巣）' : ''}`);
+    }
     else if (p.layer === 't' && Math.hypot(p.x - (TEXIT.tx + 0.5) * T, p.y - (TEXIT.ty + 0.5) * T) < T * 1.6) teleport(p, 's', w.townPos.x, w.townPos.y + 56);
   });
 
@@ -1792,6 +2258,11 @@ io.on('connection', socket => {
     if (d.stage !== undefined) w.quest.stage = d.stage;
     if (d.human) { w.nextHuman = w.day; w.humanAt = 0; w.isNight = false; if (w.time > DAY_LEN - 60) w.time = 10; }
     if (d.cube) w.cubes.push({ id: w.nextId++, x: d.cube.x, y: d.cube.y, grab: [] });
+    if (d.bird) { w.isNight = false; w.rain = 0; if (w.time < 20 || w.time > DAY_LEN - 20) w.time = 60; w.birdCd = 0; w.bird = null; }
+    if (d.army) { startArmy(w); w.army.warn = 2; if (d.army.pos !== undefined) { w.army.axis = 'x'; w.army.dir = 1; w.army.pos = d.army.pos; } }
+    if (d.rain) { w.rain = 30; w.wet = 1; }
+    if (d.noon) { w.isNight = false; w.rain = 0; w.time = DAY_LEN / 2; }
+    if (d.clear) { const { l, x0, y0, x1, y1 } = d.clear, g = gridOf(w, l); for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) { const i = ty * UW + tx; if (g[i] !== U.STAIR_UP && g[i] !== U.STAIR_DN) { g[i] = U.OPEN; w.tileQ.push([LC(l), i, U.OPEN]); } } recomputeSupport(w, l); }
   });
 
   socket.on('disconnect', async () => {
@@ -1813,8 +2284,10 @@ function leaveWorld(socket, silent) {
   if (!w || !w.players[socket.id]) return;
   const p = w.players[socket.id];
   if (p.grab) releaseGrab(w, p);
+  if (p.trap) p.trap = null;
   w.saved[p.name] = playerSave(p);
   delete w.players[socket.id];
+  if (socket.connected && !w.gameOver) socket.emit('backup', makeBackup(w));
   if (!silent) msg(w, `${p.name} が出ていった`);
   unloadIfEmpty(w);
 }
