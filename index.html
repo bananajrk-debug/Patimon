@@ -1981,7 +1981,7 @@ function drawTouchUI() {
 }
 
 // ================= パネル =================
-function openPanel(kind) { panel = kind; held = -1; $('panel').classList.remove('hidden'); renderPanel(); }
+function openPanel(kind) { panel = kind; held = -1; $('pbody').dataset.panel = ''; $('panel').classList.remove('hidden'); renderPanel(); }
 function closePanel() { panel = null; chest = null; npc = null; held = -1; gachaAnim = null; betAnim = null; $('panel').classList.add('hidden'); }
 function slotHTML(s, attrs, cls, num) {
   return `<div class="slot ${cls || ''}" ${attrs} title="${s ? D.ITEMS[s.id].n : ''}">${num ? `<span class="num">${num}</span>` : ''}${s ? `<img src="${iconURL(s.id)}">${s.n > 1 ? `<span>${s.n}</span>` : ''}` : ''}</div>`;
@@ -2078,7 +2078,10 @@ function renderPanel() {
     h = npc.lines.map(l => `<div class="qstep">${esc(l)}</div>`).join('');
   }
   $('ptitle').innerHTML = `${title} <small>${touchMode ? '' : 'Space / Esc で閉じる'}</small>`;
-  body.innerHTML = h;
+  if (body.dataset.panel === panel && body.innerHTML === h) { $('phint').textContent = hint; return; }   // 中身が同じなら描き直さない
+  const keep = body.dataset.panel === panel ? [body.scrollTop, ...[...body.querySelectorAll('.recipes, .shoplist')].map(el => el.scrollTop)] : null;
+  body.innerHTML = h; body.dataset.panel = panel;
+  if (keep) { body.scrollTop = keep[0]; body.querySelectorAll('.recipes, .shoplist').forEach((el, i) => { if (keep[i + 1] !== undefined) el.scrollTop = keep[i + 1]; }); }   // スクロール位置を保つ
   $('phint').textContent = hint;
 }
 $('pbody').addEventListener('click', e => {
