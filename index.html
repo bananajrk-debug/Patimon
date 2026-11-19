@@ -91,6 +91,16 @@
   .rc button { padding: 6px 14px; border: none; border-radius: 4px; background: #d79b3b; color: #1d140b; font-weight: bold; cursor: pointer; font-family: inherit; }
   .rc button:disabled { background: #4b3a24; color: #7d6a4c; cursor: default; }
   .phint { margin-top: 10px; font-size: 12px; color: #8f7d60; }
+  #pinfo { margin-top: 8px; min-height: 64px; background: #1c140b; border: 1px solid #3e2f1c; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: #c8b796; }
+  #pinfo:empty::before { content: 'アイテムにカーソルを合わせる（タップする）と説明が出る'; color: #6b5a40; }
+  .iinfo { display: flex; gap: 10px; align-items: flex-start; }
+  .iinfo img { width: 40px; height: 40px; flex: none; }
+  .iinfo b { color: #f0d9a8; font-size: 14px; }
+  .iinfo small { color: #8f7d60; margin-left: 6px; }
+  .iinfo div div { margin-top: 2px; }
+  .iinfo .ist { color: #9be39b; }
+  .iinfo .isrc { color: #b8a888; }
+  .rc img.ri { cursor: help; }
   .invwrap { display: flex; gap: 18px; align-items: flex-start; }
   .eqbox { width: 150px; background: #22180e; border-radius: 6px; padding: 10px; text-align: center; }
   .eqbox .eqrow { display: flex; align-items: center; gap: 8px; margin: 8px 0; text-align: left; font-size: 12px; color: #c8b796; }
@@ -184,7 +194,7 @@
   <br><button id="storyBtn">匂いをたどる</button>
 </div></div>
 <canvas id="c"></canvas>
-<div id="panel" class="hidden"><h2 id="ptitle"></h2><div id="pbody"></div><div class="phint" id="phint"></div></div>
+<div id="panel" class="hidden"><h2 id="ptitle"></h2><div id="pbody"></div><div id="pinfo"></div><div class="phint" id="phint"></div></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -208,7 +218,8 @@ let touchMode = false, joy = null, wt = null, wakeT = 0;
 const objs = { s: new Map(), u: new Map(), t: new Map(), u2: new Map(), u3: new Map() }, items = new Map();
 let grass = new Map(), st = null, cracks = new Map();   // キー: "階:マス番号"
 let sand = [], pits = [], puddles = [], armyBanner = 0, ddTouch = false, explored = null, expKey = '', expT = 0;
-const RP = {}, RE = {}, RC = {};
+const RP = {}, RE = {}, RC = {}, RCR = {};
+let EXW = 100, EXH = 75, expDirty = true, bigMap = false, itemCard = null, lastSelId = null;
 const msgs = [], parts = [];
 let gameover = null, panel = null, chest = null, held = -1, shake = 0;
 let equip = { jaw: null, armor: null }, lair = null, townPos = null, bait = null, clearInfo = null, webs = [], questFlash = 0;
@@ -346,9 +357,21 @@ socket.on('world', d => {
   under = b64(d.under); town = b64(d.town);
   grids.u = under; grids.u2 = b64(d.under2); grids.u3 = b64(d.under3);
   sand = d.sand || []; pits = d.pits || []; puddles = d.puddles || [];
-  expKey = 'antExp_' + d.code; explored = new Uint8Array(50 * 38);
-  try { const e = localStorage.getItem(expKey); if (e) explored = b64(e); } catch (er) {}
-  for (const l of LAYERS) objs[l] = new Map(d.objs[l].map(([i, t, hp, a]) => [i, { t, hp, a }]));
+  EXW = Math.ceil(D.SW / 4); EXH = Math.ceil(D.SH / 4);
+  expKey = 'antExp_' + d.code; explored = new Uint8Array(EXW * EXH); expDirty = true;
+  try {
+    const e = localStorage.getItem(expKey);
+    if (e) {
+      const old = b64(e);
+      if (old.length === explored.length) explored = old;
+      else if (old.length === 50 * 38) {                 // 地図が広くなる前の記録を、真ん中へずらして引き継ぐ
+        const ox = Math.round((EXW - 50) / 2), oy = Math.round((EXH - 38) / 2);
+        for (let i = 0; i < old.length; i++) if (old[i]) { const x = i % 50 + ox, y = (i / 50 | 0) + oy; if (x < EXW && y < EXH) explored[y * EXW + x] = 1; }
+      }
+    }
+  } catch (er) {}
+  for (const l of LAYERS) objs[l] = new Map(d.objs[l].map(([i, t, hp, a, dd]) => [i, { t, hp, a, d: dd || undefined }]));
+  for (const k in RCR) delete RCR[k];
   items.clear(); for (const it of d.items) addItemC(it);
   for (const k in RC) delete RC[k];
   for (const c of d.cubes) RC[c[0]] = { x: c[1], y: c[2], tx: c[1], ty: c[2], n: c[3] };
@@ -374,7 +397,7 @@ socket.on('chest', d => {
   if (d.update && !(panel === 'chest' && chest && chest.l === d.l && chest.i === d.i)) return;
   chest = d; openPanel('chest');
 });
-socket.on('openCraft', () => openPanel('craft'));
+socket.on('openCraft', d => { openPanel('craft'); if (d && d.tab === 'cook') setTimeout(() => { const g = document.querySelector('#pbody .grp.cook'); if (g) g.scrollIntoView({ block: 'start' }); }, 30); });
 socket.on('msg', t => { msgs.push({ t, life: 6 }); if (msgs.length > 6) msgs.shift(); });
 socket.on('gameover', d => gameover = { day: d.day, t: 7 });
 socket.on('collapse', ({ l, list }) => {   // 天井の土がまとめて崩れ落ちる
@@ -392,6 +415,7 @@ socket.on('st', s => {
   cracks = new Map(s.k.map(([lc, i, t]) => [LAYERS[lc] + ':' + i, t]));
   sync(RP, s.p.filter(p => p[0] !== MEID).map(p => ({ id: p[0], x: p[4], y: p[5], a: p[6], d: p, l: p[3] })));
   sync(RE, s.e.map(e => ({ id: e[0], x: e[3], y: e[4], a: e[5], d: e, l: e[2] })));
+  sync(RCR, (s.cr || []).map(c => ({ id: c[0], x: c[3], y: c[4], a: c[5], d: c, l: c[2] })));
   const seen = {};
   for (const c of s.cb) { seen[c[0]] = 1; const r = RC[c[0]] || (RC[c[0]] = { x: c[1], y: c[2] }); r.tx = c[1]; r.ty = c[2]; r.n = c[3]; }
   for (const id in RC) if (!seen[id]) delete RC[id];
@@ -457,7 +481,8 @@ addEventListener('keydown', e => {
   if (e.code === 'Tab') { e.preventDefault(); panel === 'inv' ? closePanel() : openPanel('inv'); }
   if (e.code === 'KeyC') panel === 'craft' ? closePanel() : openPanel('craft');
   if (e.code === 'KeyJ') panel === 'journal' ? closePanel() : openPanel('journal');
-  if (e.code === 'Escape') { if (!$('story').classList.contains('hidden')) $('storyBtn').click(); closePanel(); }
+  if (e.code === 'KeyM') bigMap = !bigMap;
+  if (e.code === 'Escape') { if (!$('story').classList.contains('hidden')) $('storyBtn').click(); closePanel(); bigMap = false; }
   if (e.code === 'KeyE' && !e.repeat) interactFront();
   if (e.code === 'KeyO' && !e.repeat) placeFront();
   if (e.code === 'KeyF') socket.emit('enter');
@@ -467,6 +492,7 @@ addEventListener('keydown', e => {
     e.preventDefault(); if (e.repeat) return;
     if (!$('story').classList.contains('hidden')) $('storyBtn').click();
     else if (panel) closePanel();
+    else if (bigMap) bigMap = false;
     else socket.emit('mash');
   }
 });
@@ -483,7 +509,8 @@ cv.addEventListener('mousedown', e => {
 addEventListener('mouseup', e => { if (e.button === 0) mouse.l = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('wheel', e => { if (inGame()) setSel((sel + (e.deltaY > 0 ? 1 : 7)) % 8); }, { passive: true });
-function setSel(i) { sel = i; socket.emit('sel', i); }
+function setSel(i) { sel = i; socket.emit('sel', i); showCard(); }
+function showCard() { const s = inv[sel]; itemCard = s ? { id: s.id, t: 4 } : null; lastSelId = s ? s.id : null; }
 const aim = () => ({ x: me.x + (mouse.x - VW / 2) / Z, y: me.y + (mouse.y - VH / 2) / Z });
 
 // ---- 目の前を操作（E / K / O） ----
@@ -501,7 +528,7 @@ function kAim() {
   if (best) return { x: best.x, y: best.y, enemy: true };
   return frontPoint(28);
 }
-const INTERACT = { chest: 1, bench: 1, bed: 1, clue: 1, clue3: 1, cocoon: 1, queenCocoon: 1, npcShop: 1, shelf: 1, gachaMachine: 1, npcGacha: 1, betTable: 1, npcBet: 1, board: 1 };
+const INTERACT = { stove: 1, aphidHut: 1, mushBed: 1, chest: 1, bench: 1, bed: 1, clue: 1, clue3: 1, cocoon: 1, queenCocoon: 1, npcShop: 1, shelf: 1, gachaMachine: 1, npcGacha: 1, betTable: 1, npcBet: 1, board: 1 };
 function nearCube() {
   if (me.l !== 's') return null;
   let best = null, bd = 1e9;
@@ -513,6 +540,7 @@ function interactFront() {
   const ms = myState();
   if (ms && ms[18]) { socket.emit('use', { x: me.x, y: me.y }); return; }      // 角砂糖を離す
   if (inv[sel] && D.ITEMS[inv[sel].id].tool) { socket.emit('use', { x: me.x, y: me.y }); return; }   // ロープ・刺激臭の玉
+  if (ms && ms[24]) { socket.emit('use', { x: me.x, y: me.y }); return; }      // ダンゴムシから降りる
   const W = LW(me.l), T = D.T, cx0 = Math.floor(me.x / T), cy0 = Math.floor(me.y / T);
   let best = null, bs = 1e9;
   for (let ty = cy0 - 3; ty <= cy0 + 3; ty++) for (let tx = cx0 - 3; tx <= cx0 + 3; tx++) {
@@ -525,9 +553,23 @@ function interactFront() {
   }
   const c = nearCube();
   if (c && (!best || Math.hypot(c.x - me.x, c.y - me.y) < bs)) { socket.emit('use', { x: c.x, y: c.y }); return; }
+  const cr = nearCritter();
+  if (cr && (!best || cr.sc < bs)) { socket.emit('use', { x: cr.x, y: cr.y }); return; }
   if (best) socket.emit('use', best);
   else if (canEnter()) socket.emit('enter');
   else socket.emit('eat');
+}
+function nearCritter() {                     // 目の前のアブラムシ・ダンゴムシ
+  let best = null, bs = 1e9;
+  for (const id in RCR) {
+    const c = RCR[id];
+    if (LAYERS[c.d[2]] !== me.l || c.d[6] & 4) continue;
+    const d = Math.hypot(c.x - me.x, c.y - me.y);
+    if (d > D.REACH + 10) continue;
+    const sc = d + angDiff(Math.atan2(c.y - me.y, c.x - me.x), me.a) * 40;
+    if (sc < bs) { bs = sc; best = { x: c.x, y: c.y, sc, c }; }
+  }
+  return best;
 }
 function placeFront() {
   const s = inv[sel];
@@ -569,7 +611,8 @@ function touchButtons() {
   return [...extra,
     { id: 'inv', label: '持ち物', x: x1, y: y1, r }, { id: 'craft', label: 'クラフト', x: x2, y: y1, r },
     { id: 'eat', label: inv[sel] && D.ITEMS[inv[sel].id].tool ? '使う' : inv[sel] && D.ITEMS[inv[sel].id].cool ? '飲む' : '食べる', x: x1, y: y2, r }, { id: 'enter', label: me.l === 's' ? '入る' : me.l === 't' ? '地上へ' : ({ down: '降りる', up: '上がる', out: '地上へ' }[(nearExit() || {}).kind] || '出入り'), x: x2, y: y2, r, on: canEnter() },
-    { id: 'journal', label: '目標', x: x1, y: y3, r }, { id: 'act', label: 'つかむ/話す', x: x2, y: y3, r },
+    { id: 'journal', label: '目標', x: x1, y: y3, r }, { id: 'act', label: myState() && myState()[24] ? '降りる' : 'つかむ/話す', x: x2, y: y3, r },
+    { id: 'map', label: bigMap ? '閉じる' : '地図', x: x2 - 72, y: y3, r: 24 },
   ];
 }
 function pressBtn(id) {
@@ -581,6 +624,7 @@ function pressBtn(id) {
   if (id === 'act') interactFront();
   if (id === 'mash') socket.emit('mash');
   if (id === 'down') ddTouch = !ddTouch;
+  if (id === 'map') bigMap = !bigMap;
 }
 cv.addEventListener('touchstart', e => {
   e.preventDefault();
@@ -804,7 +848,7 @@ function smooth(store, dt) {
 }
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; TT += dt;
-  if (D && under) { update(dt); smooth(RP, dt); smooth(RE, dt); smooth(RC, dt); render(dt); }
+  if (D && under) { update(dt); smooth(RP, dt); smooth(RE, dt); smooth(RC, dt); smooth(RCR, dt); render(dt); }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -833,6 +877,8 @@ function update(dt) {
       if (me.l === 's' && inPuddleC(me.x, me.y)) spd *= hasAccC('floater') ? 0.8 : 0.45;   // 水たまり
       if (me.l === 's' && pits.some(q => Math.hypot(me.x - q.x, me.y - q.y) < q.r)) spd *= 0.6;   // アリジゴクの砂
       if (cube) spd *= dragSpeedC(cube.n) / D.PLAYER_SPEED;            // 角砂糖を引っぱっている
+      if (ms && ms[24]) { spd *= D.RIDE_MULT; const rc = RCR[ms[24]]; if (rc && rc.d[6] & 8) spd *= 0.5; }   // ダンゴムシ（丸まると遅い）
+      if (ms && ms[23] && ms[23][0] > 0) spd *= 1.25;                // ミツ団子
       me.x += dx / len * D.PLAYER_SPEED * spd * dt; me.y += dy / len * D.PLAYER_SPEED * spd * dt;
       collide(me.l, me, D.PR);
       if (cube) {
@@ -859,10 +905,13 @@ function update(dt) {
   if (expT <= 0 && explored && me.l === 's') {
     expT = 0.5;
     const cx = Math.floor(me.x / (4 * D.T)), cy = Math.floor(me.y / (4 * D.T));
-    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) if (dx * dx + dy * dy <= 10 && cx + dx >= 0 && cy + dy >= 0 && cx + dx < 50 && cy + dy < 38) explored[(cy + dy) * 50 + cx + dx] = 1;
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) if (dx * dx + dy * dy <= 10 && cx + dx >= 0 && cy + dy >= 0 && cx + dx < EXW && cy + dy < EXH && !explored[(cy + dy) * EXW + cx + dx]) { explored[(cy + dy) * EXW + cx + dx] = 1; expDirty = true; }
     if (Math.random() < 0.05) try { localStorage.setItem(expKey, btoa(String.fromCharCode(...explored))); } catch (e) {}
   }
   if (armyBanner > 0) armyBanner -= dt;
+  if (itemCard) { itemCard.t -= dt; if (itemCard.t <= 0) itemCard = null; }
+  const curId = inv[sel] ? inv[sel].id : null;
+  if (curId !== lastSelId) { lastSelId = curId; if (curId) itemCard = { id: curId, t: 3 }; else itemCard = null; }
   if (shake > 0) shake -= dt;
   if (humanT > 0) humanT -= dt;
   for (const h of hwarns) h.t -= dt;
@@ -920,10 +969,12 @@ function render(dt) {
       if (d[6] < 100) bar(e.x - 14, e.y - 24, 28, 3, d[6] / 100, '#e74c3c');
       continue;
     }
+    if (d[1] === 4) { drawLadybug(e.x, e.y, e.a, d[7], e.phase * .6); if (d[6] < 100) bar(e.x - 12, e.y - 18, 24, 3, d[6] / 100, '#e74c3c'); continue; }
     if (d[1] === 2) drawSpider(e.x, e.y, e.a, e.phase * .3, d[7], 1.15, true);
     else if (d[1] === 0) drawSpider(e.x, e.y, e.a, e.phase * .5, d[7], 0.42); else drawBeetle(e.x, e.y, e.a, e.phase * .6, d[7], 0.5);
     if (d[6] < 100 && d[1] !== 2) bar(e.x - 14, e.y - 22, 28, 3, d[6] / 100, '#e74c3c');
   }
+  drawCritters(vis);
   for (const id in RP) {                                                          // 仲間
     const p = RP[id], d = p.d;
     if (d[9] || LAYERS[d[3]] !== L || !vis(p.x, p.y, 30)) continue;
@@ -1122,6 +1173,107 @@ function drawArmy(x0, y0, x1, y1) {                // 軍隊アリの大行進
   }
 }
 
+
+// ================= v0.8：牧場・畑・料理・ダンゴムシの描画 =================
+Object.assign(ICON, {
+  mush: g => { ln(g, [[0, 2], [0, 12]], '#e8dcc0', 6); ell(g, 0, 0, 13, 8, 0, '#9a6a3a'); ell(g, -3, -3, 5, 2.5, 0, 'rgba(255,255,255,.25)'); circ(g, 5, -2, 1.6, '#e8d8b0'); circ(g, -6, 1, 1.3, '#e8d8b0'); },
+  honeydew: g => { g.fillStyle = '#f2c04a'; g.beginPath(); g.moveTo(0, -13); g.quadraticCurveTo(12, 3, 0, 12); g.quadraticCurveTo(-12, 3, 0, -13); g.fill(); ell(g, -3, 1, 3, 5, 0, 'rgba(255,255,230,.6)'); circ(g, 7, -8, 2, '#ffe08a'); },
+  stove: g => { for (let k = 0; k < 7; k++) { const a = k / 7 * 6.28; circ(g, Math.cos(a) * 11, Math.sin(a) * 8 + 3, 5, k % 2 ? '#8a8478' : '#a09a8c'); } circ(g, 0, 3, 6, '#ff9a3a'); circ(g, 0, 3, 3, '#ffe08a'); ell(g, 0, -6, 10, 6, 0, '#5a5a62'); ell(g, 0, -8, 8, 3, 0, '#8a8a94'); },
+  aphidHut: g => { g.fillStyle = '#6a9a3a'; g.beginPath(); g.arc(0, 4, 14, Math.PI, 0); g.closePath(); g.fill(); for (let k = -2; k <= 2; k++) ell(g, k * 5, -4 + Math.abs(k) * 3, 4, 7, k * .4, '#7fb448'); ell(g, 0, 6, 5, 4, 0, '#2a1a0a'); circ(g, 8, 10, 3.5, '#a8e070'); },
+  mushBed: g => { g.fillStyle = '#5a3e24'; g.fillRect(-14, 0, 28, 10); g.fillStyle = '#7a5a34'; g.fillRect(-14, -2, 28, 4); for (const [x, s] of [[-7, 1], [3, 1.3], [10, .8]]) { ln(g, [[x, -2], [x, -8 * s]], '#e8dcc0', 3); ell(g, x, -9 * s, 6 * s, 4 * s, 0, '#9a6a3a'); } },
+  soup: g => { ell(g, 0, 4, 14, 9, 0, '#c8b090'); ell(g, 0, 1, 12, 5, 0, '#6ab845'); for (let k = 0; k < 2; k++) ln(g, [[-4 + k * 7, -6], [-2 + k * 7, -12]], 'rgba(255,255,255,.6)', 1.5); },
+  roastSeed: g => { ell(g, 0, 0, 9, 13, .5, '#8a5a2a'); ell(g, -2, -3, 4, 7, .5, '#b07a3a'); for (let k = 0; k < 3; k++) ln(g, [[-4 + k * 4, 6], [-2 + k * 4, 2]], '#3a2010', 1.5); },
+  jam: g => { g.fillStyle = '#c03a4a'; g.fillRect(-9, -6, 18, 18); g.fillStyle = '#e8e4d8'; g.fillRect(-10, -10, 20, 5); ell(g, -3, 2, 3, 5, 0, 'rgba(255,200,200,.45)'); },
+  dango: g => { ln(g, [[-13, 13], [12, -12]], '#c8a060', 2); circ(g, -6, 6, 6, '#f2c04a'); circ(g, 0, 0, 6, '#ffe08a'); circ(g, 6, -6, 6, '#f2c04a'); },
+  mushStir: g => { ln(g, [[10, 2], [16, -4]], '#3a3a42', 3); ell(g, -1, 4, 14, 8, 0, '#3a3a42'); ell(g, -1, 2, 11, 5, 0, '#6a4a2a'); for (const [x, y] of [[-5, 0], [2, 3], [4, -1]]) ell(g, x, y, 4, 2.5, 0, '#c8a070'); },
+  glowSoup: g => { ell(g, 0, 4, 14, 9, 0, '#c8b090'); ell(g, 0, 1, 12, 5, 0, '#5ef0d0'); circ(g, 0, 1, 9, 'rgba(150,255,230,.25)'); for (let k = 0; k < 2; k++) ln(g, [[-4 + k * 7, -6], [-2 + k * 7, -12]], 'rgba(200,255,240,.7)', 1.5); },
+  stew: g => { ell(g, 0, 4, 14, 9, 0, '#c8b090'); ell(g, 0, 1, 12, 5, 0, '#8a4a22'); circ(g, -4, 1, 3, '#c87a5a'); circ(g, 4, 2, 2.5, '#9a6a3a'); ln(g, [[-2, -7], [0, -12]], 'rgba(255,255,255,.6)', 1.5); },
+  jelly: g => { g.fillStyle = 'rgba(242,176,64,.85)'; g.fillRect(-10, -8, 20, 18); g.fillStyle = 'rgba(255,240,200,.5)'; g.fillRect(-8, -6, 6, 6); ell(g, 0, 11, 13, 3, 0, '#e8e4d8'); },
+});
+function drawAphid(x, y, a, fol, alpha) {
+  ctx.save(); ctx.globalAlpha = alpha; ctx.translate(x, y); ctx.rotate(a);
+  ell(ctx, 1, 3, 7, 4, 0, 'rgba(0,0,0,.22)');
+  for (const sd of [-1, 1]) for (let k = -1; k <= 1; k++) ln(ctx, [[k * 3, 0], [k * 3 + 1, sd * 6]], '#4a7a2a', .8);
+  ell(ctx, -1, 0, 7, 5.5, 0, '#9ad860'); ell(ctx, -2, -2, 3.5, 2, 0, 'rgba(255,255,220,.45)');
+  circ(ctx, 5, 0, 2.6, '#7ab848'); ln(ctx, [[-6, -2], [-10, -4]], '#4a7a2a', 1); ln(ctx, [[-6, 2], [-10, 4]], '#4a7a2a', 1);
+  ctx.restore();
+  if (fol) { ctx.fillStyle = `rgba(255,140,190,${.6 + Math.sin(TT * 5) * .3})`; ctx.font = '8px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('♥', x, y - 9); }
+}
+function drawPill(x, y, a, rolled, phase) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  ell(ctx, 2, 5, 18, 11, 0, 'rgba(0,0,0,.28)');
+  if (rolled) {                                       // 丸まって守る
+    circ(ctx, 0, 0, 12, '#5a5a66'); for (let k = -2; k <= 2; k++) { ctx.strokeStyle = '#3a3a44'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(0, 0, 12, 12 * (1 - Math.abs(k) * .3), Math.PI / 2, 0, 7); ctx.stroke(); }
+    ell(ctx, -4, -4, 4, 2.5, -.6, 'rgba(255,255,255,.2)');
+  } else {
+    for (const sd of [-1, 1]) for (let k = -3; k <= 3; k++) { const w = Math.sin(phase + k + (sd > 0 ? 1.5 : 0)) * 2; ln(ctx, [[k * 3.5, sd * 8], [k * 3.5 + w, sd * 12]], '#2a2a32', 1); }
+    ell(ctx, 0, 0, 17, 10, 0, '#62626e');
+    for (let k = -3; k <= 3; k++) ln(ctx, [[k * 4.4, -9.5 + Math.abs(k) * .6], [k * 4.4, 9.5 - Math.abs(k) * .6]], '#45454e', 1.3);
+    ell(ctx, -3, -4, 9, 3, 0, 'rgba(255,255,255,.14)');
+    ell(ctx, 16, 0, 4, 6, 0, '#4a4a54'); ln(ctx, [[18, -3], [24, -7]], '#2a2a32', 1); ln(ctx, [[18, 3], [24, 7]], '#2a2a32', 1);
+  }
+  ctx.restore();
+}
+function drawLadybug(x, y, a, hit, phase) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  ell(ctx, 1, 4, 12, 9, 0, 'rgba(0,0,0,.3)');
+  for (const sd of [-1, 1]) for (let k = -1; k <= 1; k++) ln(ctx, [[k * 4, sd * 6], [k * 4 + Math.sin(phase + k) * 2, sd * 11]], '#111', 1.2);
+  ell(ctx, 0, 0, 11, 9, 0, hit ? '#fff' : '#d8262a'); ln(ctx, [[-11, 0], [9, 0]], '#300', 1.2);
+  for (const [px, py] of [[-5, -4], [-5, 4], [2, -5], [2, 5], [-1, 0]]) circ(ctx, px, py, 1.9, '#111');
+  ell(ctx, 10, 0, 4, 5, 0, '#111'); circ(ctx, 11, -2.5, 1.2, '#fff'); circ(ctx, 11, 2.5, 1.2, '#fff');
+  ctx.restore();
+}
+function drawCritters(vis) {
+  for (const id in RCR) {
+    const c = RCR[id], d = c.d;
+    if (LAYERS[d[2]] !== me.l) continue;
+    let x = c.x, y = c.y, a = c.a;
+    if (d[6] & 4) { const rid = d[8]; if (rid === MEID) { x = me.x; y = me.y; a = me.a; } else if (RP[rid]) { x = RP[rid].x; y = RP[rid].y; a = RP[rid].a; } }
+    if (!vis(x, y, 30)) continue;
+    if (d[1] === 0) drawAphid(x, y, a, d[6] & 1, 1);
+    else {
+      if (d[6] & 4) { ctx.save(); ctx.translate(x, y); ctx.scale(1.35, 1.35); drawPill(0, 0, a, d[6] & 8, TT * 12); ctx.restore(); }
+      else drawPill(x, y, a, d[6] & 8, c.phase * .4);
+      if (!(d[6] & 2) && d[7] > 0) { ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#ff9ac8'; ctx.fillText('♥'.repeat(d[7]) + '♡'.repeat(3 - d[7]), x, y - 16); }
+      else if (d[6] & 2 && !(d[6] & 4) && Math.hypot(x - me.x, y - me.y) < 120) nameTag('🐾 乗れる', x, y - 16, '#ffd8ec');
+    }
+  }
+}
+function drawFarmObj(o, x, y, tx, ty) {             // 調理台・アブラムシ小屋・キノコ床
+  const near = Math.hypot(x - me.x, y - me.y) < 110, dd = o.d || [];
+  if (o.t === 'stove') {
+    ell(ctx, x + 2, y + 6, 17, 10, 0, 'rgba(0,0,0,.3)');
+    for (let k = 0; k < 8; k++) { const an = k / 8 * 6.28; circ(ctx, x + Math.cos(an) * 12, y + Math.sin(an) * 9 + 2, 5.5, k % 2 ? '#8a8478' : '#a09a8c'); }
+    const f = .7 + Math.sin(TT * 9 + tx) * .2;
+    circ(ctx, x, y + 2, 8 * f, '#ff8a2a'); circ(ctx, x, y + 2, 4 * f, '#ffe08a');
+    ell(ctx, x, y - 6, 11, 6, 0, '#55555e'); ell(ctx, x, y - 8, 9, 3.5, 0, '#8a8a94');
+    if (Math.random() < .08) parts.push({ l: me.l, x: x + (Math.random() - .5) * 8, y: y - 12, vx: 0, vy: -18, life: 1.2, col: '230,230,230', r: 2 });
+    if (near) nameTag('🍳 調理台', x, y - 20, '#ffe0b0');
+  } else if (o.t === 'aphidHut') {
+    ell(ctx, x + 2, y + 9, 20, 9, 0, 'rgba(0,0,0,.3)');
+    ctx.fillStyle = '#5a8a2e'; ctx.beginPath(); ctx.arc(x, y + 6, 18, Math.PI, 0); ctx.closePath(); ctx.fill();
+    for (let k = -3; k <= 3; k++) ell(ctx, x + k * 5, y - 4 + Math.abs(k) * 3, 4.5, 8, k * .35, k % 2 ? '#7fb448' : '#6ea43c');
+    ell(ctx, x, y + 7, 6, 5, 0, '#1a1008');
+    for (let k = 0; k < (dd[0] || 0); k++) drawAphid(x - 12 + k * 12, y + 14 + (k % 2) * 3, Math.sin(TT + k) * .5 - 1.57, 0, .95);
+    if (dd[2] > 0) for (let k = 0; k < Math.min(4, dd[2]); k++) circ(ctx, x + 14 + (k % 2) * 4, y - 10 + k * 4 + Math.sin(TT * 3 + k) * 1, 2.4, '#f2c04a');
+    if (near) nameTag(`🐛${dd[0] || 0}/${D.HUT_CAP}　🌿${dd[1] || 0}　💧${dd[2] || 0}`, x, y - 22, '#d8f0b0');
+  } else {
+    ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(x - 15, y - 9, 32, 22);
+    ctx.fillStyle = '#4a3220'; ctx.fillRect(x - 16, y - 11, 32, 22);
+    ctx.fillStyle = '#6a4a2c'; ctx.fillRect(x - 14, y - 9, 28, 18);
+    for (let k = 0; k < Math.min(6, dd[0] || 0); k++) ell(ctx, x - 10 + (k % 3) * 10, y - 4 + (k / 3 | 0) * 8, 5, 2.5, k * .7, '#7a9a2e');
+    const ready = (dd[2] || 0) + (dd[3] || 0), g = (dd[1] || 0) / 100;
+    const show = Math.min(6, ready), grow = dd[0] > 0 && ready < 10 ? g : 0;
+    for (let k = 0; k < show; k++) {
+      const px = x - 10 + (k % 3) * 10, py = y - 2 + (k / 3 | 0) * 7, gl = k < (dd[3] || 0);
+      if (gl) circ(ctx, px, py - 4, 7, 'rgba(120,255,220,.18)');
+      ln(ctx, [[px, py], [px, py - 5]], '#e8dcc0', 2.5); ell(ctx, px, py - 6, 5, 3.2, 0, gl ? '#5ef0d0' : '#9a6a3a');
+    }
+    if (grow > .1 && show < 6) { const k = show, px = x - 10 + (k % 3) * 10, py = y - 2 + (k / 3 | 0) * 7; ln(ctx, [[px, py], [px, py - 4 * grow]], '#e8dcc0', 2); ell(ctx, px, py - 5 * grow, 4 * grow, 2.5 * grow, 0, '#b08a5a'); }
+    if (near) nameTag(`🍃${dd[0] || 0}/${D.BED_LEAF}　育ち${dd[1] || 0}%　🍄${ready}`, x, y - 20, '#f0e0c0');
+  }
+}
+
 // ---- 地下・商店街（マス目） ----
 function drawGrid(l, tx0, ty0, tx1, ty1) {
   const T = D.T, W = LW(l), g = gridOf(l), isTown = l === 't', COL = l === 'u2' ? UCOL2 : l === 'u3' ? UCOL3 : UCOL;
@@ -1313,6 +1465,7 @@ function drawHumanShadows(vis) {                                                
 
 function canPlaceC(l, tx, ty, t) {
   if (l === 't' || tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return false;
+  if (D.OBJ[t].under && !isUnder(l)) return false;
   const i = ty * LW(l) + tx, cx = (tx + .5) * D.T, cy = (ty + .5) * D.T;
   if (isUnder(l) && grids[l][i] !== 0) return false;
   if (l === 's' && (rocks.some(o => Math.hypot(o.x - cx, o.y - cy) < o.r + 6) || Math.hypot(cx - D.NEST.x, cy - D.NEST.y) < D.NEST.r + 24)) return false;
@@ -1362,7 +1515,8 @@ function lighting(camX, camY, tx0, ty0, tx1, ty1) {
     dctx.fillStyle = g; dctx.beginPath(); dctx.arc(sx, sy, R, 0, 7); dctx.fill();
   };
   const ms = myState();
-  if (ms && !ms[9]) light(me.x, me.y, isUnder(me.l) ? 130 : me.l === 't' ? 170 : 150);
+  const seeK = ms && ms[23] && ms[23][1] > 0 ? 1.9 : 1;                         // 光るキノコスープ
+  if (ms && !ms[9]) light(me.x, me.y, (isUnder(me.l) ? 130 : me.l === 't' ? 170 : 150) * seeK);
   for (const id in RP) { const p = RP[id]; if (!p.d[9] && LAYERS[p.d[3]] === me.l) light(p.x, p.y, 100, .8); }
   const W = LW(me.l);
   for (const [i, o] of objs[me.l]) if (D.OBJ[o.t].light) light((i % W + .5) * D.T, ((i / W | 0) + .5) * D.T, o.t === 'lantern' ? 150 : 190);
@@ -1379,7 +1533,7 @@ function lighting(camX, camY, tx0, ty0, tx1, ty1) {
 function drawFog() {                         // 巣から遠いほど霧が濃く、迷いやすい
   if (me.l !== 's' || !st || st.c[2]) return;
   const d = Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) / D.T;
-  let a = clamp((d - 34) / 40, 0, 1) * .55;
+  let a = clamp((d - D.ZONE_R[0] - 4) / (D.ZONE_R[1] - D.ZONE_R[0] + 8), 0, 1) * .55;
   if (nearFlag()) a *= .45;
   if (a < .02) return;
   const g = ctx.createRadialGradient(VW / 2, VH / 2, Math.min(VW, VH) * .22, VW / 2, VH / 2, Math.max(VW, VH) * .62);
@@ -1525,6 +1679,7 @@ function drawCrackLines(x, y, p, col) {
 function drawObj(o, tx, ty) {
   const T = D.T, x = tx * T + 16, y = ty * T + 16;
   if (D.OBJ[o.t].fixed) { drawTownObj(o, tx, ty); return; }
+  if (o.t === 'stove' || o.t === 'aphidHut' || o.t === 'mushBed') { drawFarmObj(o, x, y, tx, ty); const mx2 = D.OBJ[o.t].hp; if (o.hp < mx2) bar(x - 12, y - 19, 24, 3, o.hp / mx2, '#e2a35c'); return; }
   if (o.t === 'shelter') {                                       // 葉っぱの屋根（下に隠れられる）
     for (const [px, py] of [[x - 18, y + 14], [x + 18, y + 14], [x - 18, y - 12], [x + 18, y - 12]]) ln(ctx, [[px, py], [px, py + 6]], '#7a5530', 2.5);
     ctx.globalAlpha = .8; ell(ctx, x, y, 34, 24, -.15, '#4f9a33'); ell(ctx, x - 4, y - 3, 26, 15, -.15, '#6ab845'); ln(ctx, [[x - 32, y + 6], [x + 32, y - 6]], '#2f6a1f', 2); ctx.globalAlpha = 1;
@@ -1608,6 +1763,11 @@ const foodCount = () => inv.reduce((a, s) => a + (s && D.ITEMS[s.id].food ? s.n 
 const jawLv = () => { const m = myState(); return m ? m[14] : 1; };
 const armorPct = () => { const m = myState(); return m ? Math.round(m[15] * 100) : 0; };
 const isNight = () => !!(st && st.c[2]);
+function nearObjC(t) {
+  const W = LW(me.l);
+  for (const [i, o] of objs[me.l]) if (o.t === t && Math.hypot((i % W + .5) * D.T - me.x, ((i / W | 0) + .5) * D.T - me.y) < D.T * 3.5) return true;
+  return false;
+}
 function nearBenchC() {
   for (const [i, o] of objs[me.l]) {
     if (o.t !== 'bench') continue;
@@ -1622,7 +1782,7 @@ const QSTEPS = [
   { t: '地下に残る「女王の羽」を探す', d: '巣の地下のどこかに女王の羽が落ちている。ピンクの「女王の匂い」の矢印をたどって掘り進もう。', req: [], prep: ['幅5マス以上の部屋は柱がないと部屋ごと崩れる。通路は細めに', '光るキノコは掘るとランプの材料になる'] },
   { t: '羽をアリ商店街の道具屋に見せる', d: '羽からミツの香りがする…。地上の遠くにある巣穴「アリ商店街」の道具屋ハチミツばあさんに話しかけよう。', req: [], prep: [['食べ物を5つ以上持っていく', () => foodCount() >= 5], '夜はモンスターが出るので、昼のうちに出発しよう'] },
   { t: '道具屋のお使い', d: 'ばあさんに頼まれた物を集めて渡そう。', req: [['果物のかけら 3つ', () => cnt('fruit') >= 3, () => `${cnt('fruit')}/3`], ['松葉 5本', () => cnt('needle') >= 5, () => `${cnt('needle')}/5`]], prep: ['果物のかけらは遠くのエリア（ミニマップの外側の円より外）', '松葉は中くらいの距離に落ちている'] },
-  { t: '巨木の根元の「糸の繭」を破る', d: 'いちばん遠くの巨木の根元にある、硬い糸の繭をかじって破ろう。', req: [['小石の大あごを装備している', () => jawLv() >= 2]], prep: ['作業台（小枝4・葉っぱ2）を置く', '作業台で「小石の大あご」（小石3・小枝2）。小石は大きい石のまわり', 'または道具屋で ミツ玉22 で買える'] },
+  { t: '巨木の根元の「糸の繭」を破る', d: '遠くの巨木の根元にある、硬い糸の繭をかじって破ろう。地上はとても広いので、ピンクの矢印と地図（M）を頼りに。', req: [['小石の大あごを装備している', () => jawLv() >= 2]], prep: ['作業台（小枝4・葉っぱ2）を置く', '作業台で「小石の大あご」（小石3・小枝2）。小石は大きい石のまわり', 'または道具屋で ミツ玉22 で買える'] },
   { t: '夜の空き缶をランプで照らす', d: '空き缶のそばに女王の匂いが残っている。夜にランプで照らさないと見つからない。', req: [['キノコランプを持っている', () => cnt('lamp') >= 1], ['夜になっている', () => isNight()]], prep: ['光るキノコ2つ → キノコランプ（光るキノコは地下で掘れる）', '夜は敵が多い。葉のマントなどの防具があると安心', 'ベッドで寝て待つと夜が早く来ない…昼のうちに近くまで行っておこう'] },
   { t: '角砂糖を「おびき台」へ運ぶ', d: '巨大グモは甘い物に目がない。角砂糖ブロックを3つ、クモの巣の手前のおびき台まで引っぱって運ぼう。', req: [['おびき台に角砂糖を置いた', () => st && st.q[5] >= 3, () => `${st ? st.q[5] : 0}/3`]], prep: ['角砂糖ブロックの前で E（タップ）でつかみ、後ろ向きに引っぱる', '仲間と一緒に引っぱるとどんどん速くなる', '巨大グモが出てくるので、運ぶ前に戦う準備を'] },
   { t: '巨大グモを倒す', d: 'おびき出された巨大グモを倒そう。糸で足を止めたり、子グモを呼んだりしてくる。', req: [], prep: [['甲殻の大あご（おすすめ）', () => jawLv() >= 3], ['甲殻アーマー（おすすめ）', () => armorPct() >= 40], ['食べ物を5つ以上', () => foodCount() >= 5], '甲殻はカブトムシや地下の虫の亡骸から取れる'] },
@@ -1644,7 +1804,16 @@ function journalHTML() {
       ${q.prep.length ? `<div style="margin-top:6px">準備・ヒント</div><ul>${q.prep.map(chk).join('')}</ul>` : ''}</div>`;
     if (i === stage + 1) return `<div class="qstep">🔒 ${i + 1}. ${esc(q.t)}</div>`;
     return `<div class="qstep">🔒 ${i + 1}. ？？？</div>`;
-  }).join('') + dangerGuideHTML();
+  }).join('') + dangerGuideHTML() + farmGuideHTML();
+}
+function farmGuideHTML() {
+  const ic = id => `<img src="${iconURL(id)}" style="width:20px;height:20px;vertical-align:middle">`;
+  return `<h3 style="margin:14px 0 6px">🌱 巣の暮らし（牧場・畑・料理・乗り物）</h3>
+    <div class="qstep"><b>${ic('aphidHut')} アブラムシ牧場</b><div class="d">外の草むらにいるアブラムシに${touchMode ? 'タップ' : 'E'}で声をかけると、ついてくる（3匹まで）。巣の中に「アブラムシ小屋」を置いて近くまで連れて行くと住みつく。草を入れておくと、毎朝1匹につき2個の「甘露」ができる。外ではテントウムシがアブラムシを狙ってくる！</div></div>
+    <div class="qstep"><b>${ic('mushBed')} キノコ畑</b><div class="d">巣の中に「キノコ床」を置いて葉っぱを入れると、キノコが育つ。深い階ほど早く育ち、地下2階より下では光るキノコもとれる。</div></div>
+    <div class="qstep"><b>${ic('stove')} 料理</b><div class="d">「調理台」の近くでクラフト画面を開くと料理ができる。生で食べるよりお腹がふくれて、HP回復・足が速くなる・暗い所が見える などの効果もつく。</div></div>
+    <div class="qstep"><b>🐾 ダンゴムシ</b><div class="d">野生のダンゴムシに葉っぱを持って${touchMode ? 'タップ' : 'E'}で3回あげると仲良くなる。${touchMode ? 'タップ' : 'E'}で乗ると約2倍の速さで走れて、攻撃されると丸まってダメージを減らしてくれる。仲間も乗れる。</div></div>
+    <div class="qstep"><b>🗺 地図</b><div class="d">地上は前の4倍の広さ。${touchMode ? '「地図」ボタン' : 'Mキー'}で全体の地図が見られる（行った所だけ映る）。仲間の場所は画面のふちの矢印と、左の「仲間」の欄でわかる。</div></div>`;
 }
 const DANGERS = [
   ['🐦 鳥', '影が頭上を回って急降下してくる。大きな石や葉の「影」、葉っぱの屋根の下なら見つからない。さらわれたらスペース連打で落ちて逃げられる', ['shelter', 'cloak']],
@@ -1699,7 +1868,7 @@ function nearestStairUp() {
   return best;
 }
 function lostNow() {                       // 遠く（霧の中）で旗の近くにいないと、現在地も巣の方角もわからない
-  return me.l === 's' && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) > 62 * D.T && !nearFlag();
+  return me.l === 's' && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) > D.ZONE_R[1] * D.T && !nearFlag();
 }
 function arrow(x, y, label, col) {
   const dx = x - me.x, dy = y - me.y;
@@ -1722,7 +1891,7 @@ function drawPins() {
     ctx.strokeStyle = ok ? '#7ad07a' : '#4b3a24'; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, 220, h);
     drawIcon(ctx, out, x + 14, y + 13, 20);
     ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#f0d9a8'; ctx.textAlign = 'left';
-    ctx.fillText(`${D.ITEMS[out].n}${r.bench ? ' 🔨' : ''}`, x + 28, y + 17);
+    ctx.fillText(`${D.ITEMS[out].n}${r.bench ? ' 🔨' : r.cook ? ' 🍳' : ''}`, x + 28, y + 17);
     if (ok) { ctx.fillStyle = '#7ad07a'; ctx.textAlign = 'right'; ctx.fillText('✓ 作れる', x + 212, y + 17); }
     ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
     ent.forEach(([id, n], k) => { const hv = cnt(id); ctx.fillStyle = hv >= n ? '#9be39b' : '#e88a7a'; ctx.fillText(`・${D.ITEMS[id].n}　${hv} / ${n}`, x + 12, y + 34 + k * 15); });
@@ -1777,6 +1946,169 @@ function drawDangerHUD(ms) {
   } else if (armyBanner > 0) B('🐜 軍隊アリが来る！', 'rgba(130,25,10,.85)');
   if (lostNow()) { ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(VW / 2 - 230, VH - 190, 460, 26); ctx.fillStyle = '#ffd0e8'; ctx.fillText('🌫 巣の匂いが届かない…迷子注意！ フェロモンの旗を立てて道しるべに', VW / 2, VH - 172); }
 }
+
+// ================= アイテムの説明（選んだとき・持ち物画面で出る） =================
+const ITEM_INFO = {
+  crumb: ['人間が落としたパンのかけら。手軽な食べ物', '巣のまわりに落ちている・道具屋'], seed: ['草の種。焼くと腹持ちのいい「焼き種」になる', '中くらいの距離・のびた草をかじると出ることがある'],
+  sugar: ['角砂糖ブロックを巣に運ぶと手に入る甘いかけら', '角砂糖ブロックを巣へ運ぶ'], fruit: ['熟した果物のかけら。ジャムの材料', '遠くのエリア'],
+  meat: ['虫の肉。シチューの材料', 'クモ・カブトムシ・テントウムシを倒す'], grass: ['のびた草。アブラムシのえさ・スープの材料', 'のびた草を長押しでかじる'],
+  cookie: ['人間のお菓子のかけら', '人間の足跡のまわり・道具屋'], leaf: ['いろいろな物の材料。キノコ床に入れるとキノコが育つ。ダンゴムシの好物', '木の下・大きな落ち葉'],
+  twig: ['小さな枝。作業台や道具の材料', '木の下・落ちた枝'], pebble: ['小さな石。大あごや調理台の材料', '大きい石のまわり'],
+  needle: ['とがった松葉。トゲ罠・刺激臭の玉の材料', '中くらいの距離'], dirt: ['地下を掘ると出る土。柱やバリケードの材料', '地下の土を掘る'],
+  clay: ['ねばねばの粘土。丈夫な壁や柱の材料', '地下の粘土（小石の大あごが必要）'], root: ['木の根。根っこの柱の材料', '地下の根っこ'],
+  glow: ['ほんのり光るキノコ。ランプや光るキノコスープの材料', '地下の光る土・地下2階より深いキノコ床'], silk: ['クモの糸。ロープやネットの材料', 'クモを倒す'],
+  shell: ['かたい甲殻。強い装備の材料', 'カブトムシ・地下の虫の亡骸'], honey: ['アリ商店街で使うお金', '素材を売る・お使い・角砂糖を商店街へ'],
+  chest: ['置くと物をしまえる箱。仲間と共有できる', 'クラフト'], bench: ['置くと作業台クラフトができる', 'クラフト'],
+  barricade: ['敵の通り道をふさぐ土の壁', 'クラフト'], clayWall: ['とても丈夫な壁', '作業台'], pillarD: ['地下の天井を支える柱（まわり3マス）', 'クラフト'],
+  pillarR: ['広く天井を支える柱（まわり5マス）', '作業台'], lamp: ['まわりを照らすランプ。夜の空き缶を調べるのに必要', 'クラフト・道具屋'],
+  spike: ['踏んだ敵にダメージ', '作業台'], net: ['かかった敵が遅くなる', '作業台'], bed: ['復活地点になる。夜は眠れる', 'クラフト・道具屋'],
+  jaw2: ['粘土や繭がかじれる大あご', '作業台・道具屋'], jaw3: ['巨大な根や結晶がかじれる大あご', '作業台'], jaw4: ['いちばん強い大あご', '作業台（カマキリの鎌）'],
+  armor1: ['ダメージを少し減らす', 'クラフト・道具屋'], armor2: ['ダメージをかなり減らす', '作業台'], armor3: ['ダメージを大きく減らす', '作業台（化石）'],
+  fossil: ['古い化石のかけら。化石のよろいの材料', '地下2階より深く'], crystal: ['光る結晶。結晶ランプの材料。高く売れる', '地下3階'],
+  mantisBlade: ['カマキリの鎌。カマキリの大あごの材料', 'カマキリを倒す'], water: ['飲むと体が冷える。スープの材料', '水たまりを長押し・道具屋'],
+  shelter: ['下に入ると鳥と日差しから隠れられる', 'クラフト'], flag: ['近くなら迷子にならない道しるべ', 'クラフト'], crystalLamp: ['明るく照らすランプ', '作業台'],
+  rope: ['つかまった仲間や自分を助ける', 'クラフト・道具屋'], repel: ['割るとしばらく敵と軍隊アリが近づけない', '作業台'],
+  cloak: ['止まっていれば鳥に見つからない', '作業台'], parasol: ['日差しで体温が上がりにくい', 'クラフト・道具屋'],
+  sensor: ['アリジゴクとカマキリが遠くから見える', '作業台'], floater: ['水たまりで溺れない', 'クラフト・道具屋'],
+  mush: ['巣で育てたキノコ。料理の材料', '巣の中のキノコ床'], honeydew: ['アブラムシが出す甘い露。料理の材料。商店街で売れる', '巣の中のアブラムシ小屋'],
+  stove: ['近くで料理ができる。巣の外にも置ける', 'クラフト'], aphidHut: ['外のアブラムシを住まわせる（3匹まで）。草を入れると毎朝「甘露」ができる。巣の中に置く', 'クラフト'],
+  mushBed: ['葉っぱを入れるとキノコが育つ。深い階ほど早く、地下2階より下では光るキノコもとれる。巣の中に置く', 'クラフト'],
+  soup: ['体がすっと冷える', '調理台'], roastSeed: ['腹持ちがいい', '調理台'], jam: ['HPも回復する', '調理台'], dango: ['しばらく足が速くなる', '調理台'],
+  mushStir: ['腹持ちがよく、HPも少し回復', '調理台'], glowSoup: ['しばらく暗い所がよく見える', '調理台'], stew: ['HP回復＋しばらくダメージが減る', '調理台'], jelly: ['HPが大きく回復する', '調理台'],
+};
+function itemKind(def) {
+  return def.cooked ? '料理' : def.food ? '食べ物' : def.jaw ? '装備（大あご）' : def.armor ? '装備（よろい）' : def.acc ? 'アクセサリ' : def.tool ? '道具' : def.place ? '置く物' : def.money ? 'お金' : '素材';
+}
+function itemInfo(id) {                       // [名前, 種類, 説明, 性能, 入手, 使い道]
+  const def = D.ITEMS[id]; if (!def) return null;
+  const info = ITEM_INFO[id] || ['', ''], st2 = [];
+  if (def.food) st2.push(`満腹 +${def.food}`);
+  if (def.heal) st2.push(`HP +${def.heal}`);
+  if (def.cool) st2.push(`体温 -${def.cool}`);
+  if (def.buff) st2.push(`${D.BUFF_NAME[def.buff]} ${def.bt}秒`);
+  if (def.jaw) { const J = D.JAW[def.jaw]; st2.push(`掘る速さ ${J.dig}・攻撃力 ${J.atk}`); }
+  if (def.armor) st2.push(`防御 ${Math.round(def.armor * 100)}%`);
+  if (def.acc && D.ACC_INFO[id]) st2.push(D.ACC_INFO[id]);
+  if (def.place && D.OBJ[def.place]) { const O = D.OBJ[def.place]; if (O.support) st2.push(`天井を支える ${O.support}マス`); if (O.light) st2.push('光る'); if (O.under) st2.push('巣の中だけ'); }
+  if (D.SELL[id]) st2.push(`売値 🍯${D.SELL[id]}`);
+  const r = D.RECIPES.find(x => x.out === id);
+  let src = info[1] || '';
+  if (r) src = `${r.cook ? '調理台' : r.bench ? '作業台' : 'クラフト'}：` + Object.entries(r.cost).map(([k, n]) => `${D.ITEMS[k].n}${n}`).join('・');
+  const uses = [...new Set(D.RECIPES.filter(x => x.cost[id]).map(x => D.ITEMS[x.out].n))];
+  return { name: def.n, kind: itemKind(def), desc: info[0], stats: st2.join('　'), src, uses: uses.slice(0, 6).join('・') + (uses.length > 6 ? ' …' : '') };
+}
+function itemInfoHTML(id) {
+  const f = itemInfo(id); if (!f) return '';
+  return `<div class="iinfo"><img src="${iconURL(id)}"><div><b>${esc(f.name)}</b> <small>${f.kind}</small>${f.desc ? `<div>${esc(f.desc)}</div>` : ''}${f.stats ? `<div class="ist">${esc(f.stats)}</div>` : ''}
+    ${f.src ? `<div class="isrc">📦 ${esc(f.src)}</div>` : ''}${f.uses ? `<div class="isrc">🔧 材料になる：${esc(f.uses)}</div>` : ''}</div></div>`;
+}
+function wrapText(t, maxW) {
+  const out = []; let line = '';
+  for (const ch of t) { if (ctx.measureText(line + ch).width > maxW) { out.push(line); line = ch; } else line += ch; }
+  if (line) out.push(line);
+  return out;
+}
+function drawItemCard(hy) {                   // ホットバーで選んだアイテムの説明カード
+  if (!itemCard || panel || bigMap) return;
+  const f = itemInfo(itemCard.id); if (!f) return;
+  const W = 340, x = VW / 2 - W / 2;
+  ctx.font = '12px sans-serif';
+  const lines = [];
+  if (f.desc) for (const l of wrapText(f.desc, W - 60)) lines.push(['#eee', l]);
+  if (f.stats) for (const l of wrapText(f.stats, W - 60)) lines.push(['#9be39b', l]);
+  if (f.src) for (const l of wrapText('📦 ' + f.src, W - 60)) lines.push(['#c8b796', l]);
+  if (f.uses) for (const l of wrapText('🔧 ' + f.uses, W - 60)) lines.push(['#b8c8e8', l]);
+  const H = 30 + lines.length * 16, y = hy - 76 - H;
+  ctx.globalAlpha = Math.min(1, itemCard.t * 2);
+  ctx.fillStyle = 'rgba(20,14,8,.88)'; ctx.fillRect(x, y, W, H); ctx.strokeStyle = '#8a6a3a'; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, W, H);
+  drawIcon(ctx, itemCard.id, x + 24, y + 22, 30);
+  ctx.textAlign = 'left'; ctx.font = 'bold 14px sans-serif'; ctx.fillStyle = '#f0d9a8'; ctx.fillText(f.name, x + 48, y + 20);
+  const nw = ctx.measureText(f.name).width;
+  ctx.font = '11px sans-serif'; ctx.fillStyle = '#c8b796'; ctx.fillText(f.kind, x + 56 + nw, y + 20);
+  ctx.font = '12px sans-serif';
+  lines.forEach(([c, l], k) => { ctx.fillStyle = c; ctx.fillText(l, x + 48, y + 38 + k * 16); });
+  ctx.globalAlpha = 1; ctx.textAlign = 'center';
+}
+
+// ================= 地上の地図（ミニマップ・大きい地図） =================
+const fogCv = document.createElement('canvas');
+function rebuildFog() {                       // 行ったことのない場所を黒くする画像
+  fogCv.width = EXW; fogCv.height = EXH;
+  const g = fogCv.getContext('2d'), img = g.createImageData(EXW, EXH);
+  for (let i = 0; i < explored.length; i++) { img.data[i * 4] = 23; img.data[i * 4 + 1] = 17; img.data[i * 4 + 2] = 10; img.data[i * 4 + 3] = explored[i] ? 0 : 255; }
+  g.putImageData(img, 0, 0); expDirty = false;
+}
+function surfMap(mx, my, mw, mh, cx, cy, s, big) {   // cx,cy：地図の真ん中に来る座標 / s：縮尺
+  const X = x => mx + mw / 2 + (x - cx) * s, Y = y => my + mh / 2 + (y - cy) * s;
+  ctx.fillStyle = '#5a4126'; ctx.fillRect(mx, my, mw, mh);
+  const R = k => Math.max(1, k * s);
+  for (const t of trees) circ(ctx, X(t.x), Y(t.y), Math.max(4, (t.r + 300) * s), 'rgba(30,60,20,.45)');
+  ctx.fillStyle = '#8a8478'; for (const o of rocks) { if (o.k) continue; const px = X(o.x), py = Y(o.y); if (px < mx - 10 || py < my - 10 || px > mx + mw + 10 || py > my + mh + 10) continue; ctx.beginPath(); ctx.arc(px, py, R(o.r), 0, 7); ctx.fill(); }
+  for (const t of trees) circ(ctx, X(t.x), Y(t.y), Math.max(2.5, t.r * s), '#3a2a16');
+  if (big) for (const q of puddles) circ(ctx, X(q.x), Y(q.y), R(q.r * .9), 'rgba(70,110,150,.35)');
+  if (big) for (const q of sand) circ(ctx, X(q.x), Y(q.y), R(q.r), 'rgba(214,192,140,.3)');
+  ctx.strokeStyle = 'rgba(255,255,255,.12)';
+  for (const r of D.ZONE_R) { ctx.beginPath(); ctx.arc(X(D.NEST.x), Y(D.NEST.y), r * D.T * s, 0, 7); ctx.stroke(); }
+  for (const d of deco) if (d.t !== 'flower') circ(ctx, X(d.x), Y(d.y), big ? 3 : 2, d.t === 'cap' ? '#d33' : d.t === 'can' ? '#ccd' : '#a65');
+  for (const d of dens) circ(ctx, X(d.x), Y(d.y), big ? 3.5 : 2.5, '#300');
+  for (const [i, o] of objs.s) if (o.t === 'branch') { ctx.fillStyle = '#e0a050'; ctx.fillRect(X((i % D.SW) * D.T) - 1, Y((i / D.SW | 0) * D.T) - 1, 2.5, 2.5); }
+  for (const id in RC) { ctx.fillStyle = '#fff'; ctx.fillRect(X(RC[id].x) - 1.5, Y(RC[id].y) - 1.5, 3, 3); }
+  if (st && st.q[0] >= 5 && bait) circ(ctx, X(bait.x), Y(bait.y), 3, '#7fa23a');
+  if (st && st.q[0] >= 5 && lair) { ctx.strokeStyle = '#c04ad8'; ctx.beginPath(); ctx.arc(X(lair.x), Y(lair.y), 5, 0, 7); ctx.stroke(); }
+  for (const id in RE) if (LAYERS[RE[id].d[2]] === 's') circ(ctx, X(RE[id].x), Y(RE[id].y), RE[id].d[1] === 2 ? 3 : 1.5, '#ff4b3a');
+  if (big) for (const id in RCR) { const c = RCR[id]; if (LAYERS[c.d[2]] === 's') circ(ctx, X(c.x), Y(c.y), 2, c.d[1] === 0 ? '#9ad860' : c.d[6] & 2 ? '#ffd8ec' : '#9a9aa8'); }
+  if (explored) {                                                                 // 行ったことのない場所は暗いまま
+    if (expDirty || fogCv.width !== EXW) rebuildFog();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(fogCv, X(0), Y(0), D.SW * D.T * s, D.SH * D.T * s);
+  }
+  circ(ctx, X(D.NEST.x), Y(D.NEST.y), big ? 6 : 4, '#f5d48a');
+  if (townPos) { circ(ctx, X(townPos.x), Y(townPos.y), big ? 5 : 4, '#e8603a'); ctx.fillStyle = '#ffd'; ctx.font = big ? '12px sans-serif' : '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('商店街', X(townPos.x), Y(townPos.y) - 7); }
+  if (big) { ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('巣', X(D.NEST.x), Y(D.NEST.y) - 9); }
+  for (const [i, o] of objs.s) if (o.t === 'flag') { const fx = X((i % D.SW + .5) * D.T), fy = Y(((i / D.SW | 0) + .5) * D.T); ln(ctx, [[fx, fy + 3], [fx, fy - 5]], '#fff', 1); ctx.fillStyle = '#ff7ac0'; ctx.fillRect(fx, fy - 5, 4, 3); }
+  for (const id in RP) if (LAYERS[RP[id].d[3]] === 's' && !RP[id].d[9]) { circ(ctx, X(RP[id].x), Y(RP[id].y), big ? 4 : 2.5, RP[id].d[2]); if (big) { ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.fillText(RP[id].d[1], X(RP[id].x), Y(RP[id].y) - 8); } }
+  if (lostNow()) { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(mx, my + mh - 20, mw, 20); ctx.fillStyle = '#ffd0e8'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('？ 匂いが届かず現在地がわからない', mx + mw / 2, my + mh - 6); }
+  else { circ(ctx, X(me.x), Y(me.y), big ? 5 : 3, '#fff'); if (big) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(X(me.x), Y(me.y), 9 + Math.sin(TT * 5) * 2, 0, 7); ctx.stroke(); } }
+}
+function drawBigMap() {                       // Mキー：大きい地図
+  if (!bigMap || me.l !== 's') { if (bigMap && me.l !== 's') { ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(VW / 2 - 170, VH / 2 - 20, 340, 40); ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('大きい地図は地上で見られる（Mで閉じる）', VW / 2, VH / 2 + 5); } return; }
+  const pad = 40, s = Math.min((VW - pad * 2) / (D.SW * D.T), (VH - pad * 2 - 30) / (D.SH * D.T)), mw = D.SW * D.T * s, mh = D.SH * D.T * s, mx = (VW - mw) / 2, my = (VH - mh) / 2 + 10;
+  ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fillRect(0, 0, VW, VH);
+  ctx.save(); ctx.beginPath(); ctx.rect(mx, my, mw, mh); ctx.clip();
+  surfMap(mx, my, mw, mh, D.SW * D.T / 2, D.SH * D.T / 2, s, true);
+  ctx.restore();
+  ctx.strokeStyle = '#c8b796'; ctx.lineWidth = 2; ctx.strokeRect(mx, my, mw, mh);
+  ctx.fillStyle = '#f0d9a8'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(`🗺 地上の地図（${touchMode ? '「閉じる」' : 'M / Space'}で閉じる）　黒い所はまだ行っていない場所`, VW / 2, my - 10);
+}
+// ---- 仲間の位置（矢印・ほかの階） ----
+const LAYER_NAME = { s: '地上', u: '巣の中', u2: '地下2階', u3: '地下3階', t: 'アリ商店街' };
+function drawFriends(ms, QY) {
+  if (!ms || ms[9]) return;
+  const list = Object.values(RP);
+  if (!list.length) return;
+  for (const p of list) {                                                         // 同じ階：画面の外なら矢印
+    if (p.d[9] || LAYERS[p.d[3]] !== me.l || lostNow()) continue;
+    arrow(p.x, p.y, p.d[1], p.d[2]);
+  }
+  let y = 160 + QY;
+  ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+  const rows = list.map(p => {
+    const l = LAYERS[p.d[3]], same = l === me.l;
+    const where = p.d[9] ? '💀 復活待ち' : same ? (me.l === 't' ? 'アリ商店街' : `${LAYER_NAME[l]}　${Math.round(Math.hypot(p.x - me.x, p.y - me.y) / D.T)}m`) : `${LAYER_NAME[l]}にいる`;
+    return [p.d[2], p.d[1], where, same];
+  });
+  const W = Math.max(150, ...rows.map(r => ctx.measureText(r[1] + '　' + r[2]).width + 34));
+  ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(10, y, W, 20 + rows.length * 17);
+  ctx.fillStyle = '#c8b796'; ctx.font = 'bold 11px sans-serif'; ctx.fillText('👥 仲間', 18, y + 14);
+  rows.forEach(([c, n, where, same], k) => {
+    const yy = y + 31 + k * 17;
+    circ(ctx, 22, yy - 4, 4.5, c);
+    ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#fff'; ctx.fillText(n, 32, yy);
+    const nw = ctx.measureText(n).width;
+    ctx.font = '11px sans-serif'; ctx.fillStyle = same ? '#bfe3a8' : '#f0c890'; ctx.fillText('　' + where, 32 + nw, yy);
+  });
+}
 let nestByCompass = false;
 function drawHUD(dt, ms) {
   nestByCompass = false;
@@ -1792,6 +2124,10 @@ function drawHUD(dt, ms) {
     }
     ctx.fillStyle = '#ddd'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
     ctx.fillText(`大あご Lv${ms[14]}　防御 ${Math.round(ms[15] * 100)}%　🍯 ${cnt('honey')}`, 20, 82 + hx2);
+    const bf = ms[23] || [0, 0, 0], bt = [];
+    if (bf[0] > 0) bt.push(`⚡速い ${bf[0]}`); if (bf[1] > 0) bt.push(`👁 よく見える ${bf[1]}`); if (bf[2] > 0) bt.push(`🛡 かたい ${bf[2]}`);
+    if (ms[24]) bt.push('🐾 ダンゴムシに乗っている');
+    if (bt.length) { ctx.font = 'bold 12px sans-serif'; const bw = ctx.measureText(bt.join('　')).width + 20; ctx.fillStyle = 'rgba(40,60,20,.75)'; ctx.fillRect(266, 10, bw, 22); ctx.fillStyle = '#e8ffc8'; ctx.fillText(bt.join('　'), 276, 26); }
   }
   const QY = ms && me.l === 's' ? 24 : 0;
   if (st && st.q) {                                                               // 目標
@@ -1820,7 +2156,8 @@ function drawHUD(dt, ms) {
       ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('🕷 巨大グモ', VW / 2, 84);
     }
   }
-  if (me.l === 's' && ms && !ms[9] && !nestByCompass && !lostNow()) arrow(D.NEST.x, D.NEST.y, nearFlag() && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) > 62 * D.T ? '巣（旗の匂い）' : '巣', 'rgba(255,220,120,.85)');
+  drawFriends(ms, QY);
+  if (me.l === 's' && ms && !ms[9] && !nestByCompass && !lostNow()) arrow(D.NEST.x, D.NEST.y, nearFlag() && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) > D.ZONE_R[1] * D.T ? '巣（旗の匂い）' : '巣', 'rgba(255,220,120,.85)');
   drawDangerHUD(ms);
   if (ms && ms[17]) { ctx.fillStyle = 'rgba(230,230,240,.12)'; ctx.fillRect(0, 0, VW, VH); ctx.fillStyle = '#eef'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('クモの糸で動きが鈍い！', VW / 2, VH / 2 + 60); }
   if (humanT > 0 && me.l === 's') {                                               // 人間が来る
@@ -1854,32 +2191,10 @@ function drawHUD(dt, ms) {
     for (const [i, o] of objs.t) if (o.t.startsWith('npc') || o.t === 'gachaMachine' || o.t === 'board') circ(ctx, ox + (i % D.TW + .5) * sc, oy + ((i / D.TW | 0) + .5) * sc, 3, '#e86a9a');
     circ(ctx, ox + me.x / D.T * sc, oy + me.y / D.T * sc, 3, '#fff');
   } else {
-    const s = mw / (D.SW * D.T);
-    ctx.fillStyle = '#5a4126'; ctx.fillRect(mx, my, mw, mh);
-    for (const t of trees) circ(ctx, mx + t.x * s, my + t.y * s, 22, 'rgba(30,60,20,.45)');
-    ctx.fillStyle = '#8a8478'; for (const o of rocks) { if (o.k) continue; ctx.beginPath(); ctx.arc(mx + o.x * s, my + o.y * s, Math.max(1, o.r * s), 0, 7); ctx.fill(); }
-    for (const t of trees) circ(ctx, mx + t.x * s, my + t.y * s, 3.5, '#3a2a16');
-    ctx.strokeStyle = 'rgba(255,255,255,.12)';
-    for (const r of [30, 62]) { ctx.beginPath(); ctx.arc(mx + D.NEST.x * s, my + D.NEST.y * s, r * D.T * s, 0, 7); ctx.stroke(); }
-    for (const d of deco) if (d.t !== 'flower') circ(ctx, mx + d.x * s, my + d.y * s, 2, d.t === 'cap' ? '#d33' : d.t === 'can' ? '#ccd' : '#a65');
-    for (const d of dens) circ(ctx, mx + d.x * s, my + d.y * s, 2.5, '#300');
-    for (const [i, o] of objs.s) if (o.t === 'branch') { ctx.fillStyle = '#e0a050'; ctx.fillRect(mx + (i % D.SW) * D.T * s - 1, my + (i / D.SW | 0) * D.T * s - 1, 2.5, 2.5); }
-    for (const id in RC) { ctx.fillStyle = '#fff'; ctx.fillRect(mx + RC[id].x * s - 1.5, my + RC[id].y * s - 1.5, 3, 3); }
-    if (townPos) { circ(ctx, mx + townPos.x * s, my + townPos.y * s, 4, '#e8603a'); ctx.fillStyle = '#ffd'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('商店街', mx + townPos.x * s, my + townPos.y * s - 6); }
-    if (st && st.q[0] >= 5 && bait) circ(ctx, mx + bait.x * s, my + bait.y * s, 3, '#7fa23a');
-    if (st && st.q[0] >= 5 && lair) { ctx.strokeStyle = '#c04ad8'; ctx.beginPath(); ctx.arc(mx + lair.x * s, my + lair.y * s, 5, 0, 7); ctx.stroke(); }
-    circ(ctx, mx + D.NEST.x * s, my + D.NEST.y * s, 4, '#f5d48a');
-    for (const id in RE) if (LAYERS[RE[id].d[2]] === 's') circ(ctx, mx + RE[id].x * s, my + RE[id].y * s, RE[id].d[1] === 2 ? 3 : 1.5, '#ff4b3a');
-    if (explored) {                                                               // 行ったことのない場所は暗いまま
-      const cw = 4 * D.T * s;
-      ctx.fillStyle = '#17110a';
-      for (let i = 0; i < explored.length; i++) if (!explored[i]) ctx.fillRect(mx + (i % 50) * cw - .3, my + (i / 50 | 0) * cw - .3, cw + .6, cw + .6);
-    }
-    circ(ctx, mx + D.NEST.x * s, my + D.NEST.y * s, 4, '#f5d48a');
-    for (const [i, o] of objs.s) if (o.t === 'flag') { const fx = mx + (i % D.SW + .5) * D.T * s, fy = my + ((i / D.SW | 0) + .5) * D.T * s; ln(ctx, [[fx, fy + 3], [fx, fy - 5]], '#fff', 1); ctx.fillStyle = '#ff7ac0'; ctx.fillRect(fx, fy - 5, 4, 3); }
-    for (const id in RP) if (LAYERS[RP[id].d[3]] === 's' && !RP[id].d[9]) circ(ctx, mx + RP[id].x * s, my + RP[id].y * s, 2.5, RP[id].d[2]);
-    if (lostNow()) { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(mx, my + mh - 20, mw, 20); ctx.fillStyle = '#ffd0e8'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('？ 匂いが届かず現在地がわからない', mx + mw / 2, my + mh - 6); }
-    else circ(ctx, mx + me.x * s, my + me.y * s, 3, '#fff');
+    const s = mw / (D.SW * D.T) * 2.2, half = (D.SW * D.T);   // 地図が広いので、自分のまわりを大きめに表示
+    const cx = clamp(me.x, mw / 2 / s, D.SW * D.T - mw / 2 / s), cy = clamp(me.y, mh / 2 / s, D.SH * D.T - mh / 2 / s);
+    surfMap(mx, my, mw, mh, lostNow() ? D.NEST.x : cx, lostNow() ? D.NEST.y : cy, s, false);
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(mx + mw - 86, my, 86, 15); ctx.fillStyle = '#ddd'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(touchMode ? '「地図」で全体' : 'Mで全体', mx + mw - 43, my + 11);
   }
   ctx.restore();
   ctx.fillStyle = '#c8b796'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
@@ -1905,6 +2220,7 @@ function drawHUD(dt, ms) {
     const hint = def.cool ? (touchMode ? '（「飲む」ボタンで体を冷やす）' : '（右クリック/E で飲む・体を冷やす）') : def.food ? (touchMode ? `（「食べる」ボタンで +${def.food}）` : `（右クリック/E で食べる +${def.food}）`) : def.place ? (touchMode ? '（置きたい場所をタップ）' : '（右クリック/O で置く）') : def.tool ? (touchMode ? '（「使う」ボタンで使う）' : '（右クリック/E で使う）') : def.jaw || def.armor || def.acc ? '（持ち物画面で装備できる）' : def.money ? '（商店街で使えるお金）' : '';
     ctx.fillStyle = '#000'; ctx.fillText(def.n + hint, VW / 2 + 1, hy - 13); ctx.fillStyle = '#f0d9a8'; ctx.fillText(def.n + hint, VW / 2, hy - 14);
   }
+  drawItemCard(hy);
   // 状況ヒント
   let tip = '';
   if (ms && !ms[9] && !ms[19]) {
@@ -1919,7 +2235,10 @@ function drawHUD(dt, ms) {
     if (ms[18]) tip = `後ろ向きに引っぱり中…（巣・商店街の入口・おびき台へ）　${touchMode ? 'もう一度タップ' : 'E'}：離す`;
     else if (c) tip = `${touchMode ? 'タップ' : 'E'}：角砂糖をつかんで引っぱる（仲間と引くと速い）`;
     const a = aim(), o = objs[me.l].get(Math.floor(a.y / D.T) * LW(me.l) + Math.floor(a.x / D.T));
-    const TIPS = { chest: `${R}：チェストを開く`, bench: `${R}：作業台でクラフト`, bed: `${R}：${night ? '眠る' : '復活地点にする（夜は眠れる）'}`, branch: `${H}：枝をかじって小枝を集める`, bigLeaf: `${H}：落ち葉をちぎって葉っぱを集める`, husk: `${H}：虫の亡骸から甲殻を取る`, clue: `${R}：調べる`, clue3: `${R}：調べる`, cocoon: `${H}：繭をかじって破る`, queenCocoon: `${H}：繭をかじって破る`, npcShop: `${R}：話す`, shelf: `${R}：話す`, gachaMachine: `${R}：ガチャを回す`, npcGacha: `${R}：話す`, betTable: `${R}：かけをする`, npcBet: `${R}：話す`, board: `${R}：読む` };
+    const crn = nearCritter();
+    if (!tip && ms[24]) tip = `${touchMode ? '「降りる」' : 'E'}：ダンゴムシから降りる`;
+    else if (!tip && crn) { const cd = crn.c.d; tip = cd[1] === 0 ? (cd[6] & 1 ? `${touchMode ? 'タップ' : 'E'}：アブラムシをその場で待たせる` : `${touchMode ? 'タップ' : 'E'}：アブラムシを連れて行く（巣の小屋まで）`) : cd[6] & 2 ? `${touchMode ? 'タップ' : 'E'}：ダンゴムシに乗る` : (inv[sel] && inv[sel].id === 'leaf' ? `${touchMode ? 'タップ' : 'E'}：ダンゴムシに葉っぱをあげる` : '葉っぱを持ってEであげると仲良くなれそう'); }
+    const TIPS = { stove: `${R}：料理する`, aphidHut: `${R}：甘露をとる・草を入れる`, mushBed: `${R}：キノコをとる・葉っぱを入れる`, chest: `${R}：チェストを開く`, bench: `${R}：作業台でクラフト`, bed: `${R}：${night ? '眠る' : '復活地点にする（夜は眠れる）'}`, branch: `${H}：枝をかじって小枝を集める`, bigLeaf: `${H}：落ち葉をちぎって葉っぱを集める`, husk: `${H}：虫の亡骸から甲殻を取る`, clue: `${R}：調べる`, clue3: `${R}：調べる`, cocoon: `${H}：繭をかじって破る`, queenCocoon: `${H}：繭をかじって破る`, npcShop: `${R}：話す`, shelf: `${R}：話す`, gachaMachine: `${R}：ガチャを回す`, npcGacha: `${R}：話す`, betTable: `${R}：かけをする`, npcBet: `${R}：話す`, board: `${R}：読む` };
     if (o && Math.hypot(a.x - me.x, a.y - me.y) < D.REACH && TIPS[o.t]) tip = TIPS[o.t];
     if (!tip && me.l === 't') tip = `お店の前で ${touchMode ? '「つかむ/話す」' : 'E'}：話す`;
     if (isUnder(me.l) && cracks.size) for (const [key] of cracks) { const [cl, cis] = key.split(':'); if (cl !== me.l) continue; const i = +cis, tx = i % D.UW, ty = (i / D.UW) | 0; if (Math.hypot((tx + .5) * D.T - me.x, (ty + .5) * D.T - me.y) < 260) { tip = '⚠ 天井が崩れそう！ まわりごと崩れるぞ。柱を置くか離れろ！'; break; } }
@@ -1931,8 +2250,10 @@ function drawHUD(dt, ms) {
   }
   if (!touchMode) {
     ctx.textAlign = 'left'; ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,.45)';
-    ctx.fillText(`Tab 持ち物　C クラフト　J 手帳　E 調べる/話す/つかむ/使う　K 掘る/攻撃　O 置く　F 出入り　Q 捨てる${isUnder(me.l) && me.l !== 'u3' ? '　X(長押し) 下へ掘る' : ''}　Space もがく`, 12, VH - 12);
-  } else drawTouchUI();
+    ctx.fillText(`Tab 持ち物　C クラフト　J 手帳　E 調べる/話す/つかむ/使う　K 掘る/攻撃　O 置く　F 出入り　Q 捨てる　M 地図${isUnder(me.l) && me.l !== 'u3' ? '　X(長押し) 下へ掘る' : ''}　Space もがく`, 12, VH - 12);
+  }
+  drawBigMap();
+  if (touchMode) drawTouchUI();
   if (ms && ms[16]) {                                                             // 睡眠
     ctx.fillStyle = st.c[4] ? 'rgba(10,15,40,.45)' : 'rgba(10,15,40,.25)'; ctx.fillRect(0, 0, VW, VH);
     ctx.textAlign = 'center'; ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = '#c8d4ff';
@@ -1981,8 +2302,17 @@ function drawTouchUI() {
 }
 
 // ================= パネル =================
-function openPanel(kind) { panel = kind; held = -1; $('pbody').dataset.panel = ''; $('panel').classList.remove('hidden'); renderPanel(); }
-function closePanel() { panel = null; chest = null; npc = null; held = -1; gachaAnim = null; betAnim = null; $('panel').classList.add('hidden'); }
+function openPanel(kind) { panel = kind; held = -1; $('pbody').dataset.panel = ''; $('pinfo').innerHTML = ''; $('pinfo').style.display = kind === 'inv' || kind === 'craft' || kind === 'chest' ? '' : 'none'; $('panel').classList.remove('hidden'); renderPanel(); }
+function slotItemId(el) {                     // 枠に入っているアイテムのid
+  const k = el.dataset.k, i = +el.dataset.i;
+  if (k === 'inv' || k === 'cinv') return inv[i] && inv[i].id;
+  if (k === 'chest') return chest && chest.items[i] && chest.items[i].id;
+  if (k === 'eq') return equip[el.dataset.e] && equip[el.dataset.e].id;
+  return null;
+}
+let pinfoId = null;
+function setPinfo(id) { if (!id || id === pinfoId) return; pinfoId = id; $('pinfo').innerHTML = itemInfoHTML(id); }
+function closePanel() { pinfoId = null; panel = null; chest = null; npc = null; held = -1; gachaAnim = null; betAnim = null; $('panel').classList.add('hidden'); }
 function slotHTML(s, attrs, cls, num) {
   return `<div class="slot ${cls || ''}" ${attrs} title="${s ? D.ITEMS[s.id].n : ''}">${num ? `<span class="num">${num}</span>` : ''}${s ? `<img src="${iconURL(s.id)}">${s.n > 1 ? `<span>${s.n}</span>` : ''}` : ''}</div>`;
 }
@@ -2019,12 +2349,15 @@ function renderPanel() {
         if (have < r.cost[id]) ok = false;
         cost += `<span class="${have < r.cost[id] ? 'ng' : ''}"><img src="${iconURL(id)}"> ${D.ITEMS[id].n} ${have}/${r.cost[id]}</span>`;
       }
-      return `<div class="rc"><img src="${iconURL(r.out)}"><div class="nm">${D.ITEMS[r.out].n}${r.n > 1 ? ' ×' + r.n : ''}</div><div class="cost">${cost}</div><button class="pin ${pins.includes(r.out) ? 'on' : ''}" data-pin="${r.out}" title="ピン留め">📌</button><button data-craft="${ri}" ${ok ? '' : 'disabled'}>作る</button></div>`;
+      return `<div class="rc" data-info="${r.out}"><img src="${iconURL(r.out)}"><div class="nm">${D.ITEMS[r.out].n}${r.n > 1 ? ' ×' + r.n : ''}</div><div class="cost">${cost}</div><button class="pin ${pins.includes(r.out) ? 'on' : ''}" data-pin="${r.out}" title="ピン留め">📌</button><button data-craft="${ri}" ${ok ? '' : 'disabled'}>作る</button></div>`;
     };
-    const hand = D.RECIPES.map((r, i) => r.bench ? '' : row(r, i, false)).join('');
+    const nearSt = nearObjC('stove');
+    const hand = D.RECIPES.map((r, i) => r.bench || r.cook ? '' : row(r, i, false)).join('');
     const bench = D.RECIPES.map((r, i) => r.bench ? row(r, i, !near) : '').join('');
+    const cook = D.RECIPES.map((r, i) => r.cook ? row(r, i, !nearSt) : '').join('');
     h = `<div class="recipes"><div class="grp">✋ 手でつくる</div>${hand}
-      <div class="grp">🔨 作業台でつくる <small>${near ? '作業台の近くにいる ✓' : '🔒 作業台の近くで使える'}</small></div><div class="${near ? '' : 'dim'}">${bench}</div></div>`;
+      <div class="grp">🔨 作業台でつくる <small>${near ? '作業台の近くにいる ✓' : '🔒 作業台の近くで使える'}</small></div><div class="${near ? '' : 'dim'}">${bench}</div>
+      <div class="grp cook">🍳 調理台で料理 <small>${nearSt ? '調理台の近くにいる ✓' : '🔒 調理台（小石4・小枝3・土2）の近くで使える'}</small></div><div class="${nearSt ? '' : 'dim'}">${cook}</div></div>`;
     hint = '📌 でピン留めすると、材料の集まり具合が画面右に表示される。大あご・よろいは作ると自動で装備';
   } else if (panel === 'chest' && chest) {
     let g = '<div class="grid">';
@@ -2084,8 +2417,14 @@ function renderPanel() {
   if (keep) { body.scrollTop = keep[0]; body.querySelectorAll('.recipes, .shoplist').forEach((el, i) => { if (keep[i + 1] !== undefined) el.scrollTop = keep[i + 1]; }); }   // スクロール位置を保つ
   $('phint').textContent = hint;
 }
+$('pbody').addEventListener('mouseover', e => {
+  const sl = e.target.closest('.slot'), rc = e.target.closest('.rc');
+  if (sl) setPinfo(slotItemId(sl)); else if (rc) setPinfo(rc.dataset.info);
+  else { const im = e.target.closest('.cost span img'); if (im) { const sp = im.closest('.rc'); if (sp) setPinfo(sp.dataset.info); } }
+});
 $('pbody').addEventListener('click', e => {
   const t = e.target, b = t.closest('button');
+  { const sl = t.closest('.slot'), rc = t.closest('.rc'); if (sl) { const id = slotItemId(sl); if (id) { pinfoId = null; setPinfo(id); } } else if (rc && !b) { pinfoId = null; setPinfo(rc.dataset.info); } }
   if (t.id === 'dropBtn') { socket.emit('drop', held); held = -1; renderPanel(); return; }
   if (t.id === 'equipBtn') { socket.emit('equip', { slot: held }); held = -1; renderPanel(); return; }
   if (t.id === 'moveBtn') { socket.emit('moveSlot', held); held = -1; return; }
