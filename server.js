@@ -14,7 +14,10 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 // ================= 基本設定 =================
 const T = 32;                       // 1マスの大きさ
-const SW = 200, SH = 150;           // 地上のマス数
+const SW = 400, SH = 300;           // 地上のマス数（v0.8で縦横2倍）
+const OLD_SW = 200, OLD_SH = 150;   // v0.7までの地上の広さ（古いワールドを広げるとき用）
+const ZONE_R = [40, 95];            // 巣からの距離ゾーンの境目（マス）
+const RIDE_MULT = 1.9;              // ダンゴムシに乗ったときの速さ
 const UW = 140, UH = 140;           // 地下のマス数
 const TW = 36, TH = 18;             // アリ商店街のマス数
 const UCX = 70, UCY = 70;           // 地下の中心
@@ -84,7 +87,15 @@ const ITEMS = {
   rope: { n: '糸のロープ', tool: 'rope' }, repel: { n: '刺激臭の玉', tool: 'repel' },
   cloak: { n: '草のかくれみの', acc: 1, stack: 1 }, parasol: { n: '葉っぱの日傘', acc: 1, stack: 1 },
   sensor: { n: 'においセンサー', acc: 1, stack: 1 }, floater: { n: '草の浮き輪', acc: 1, stack: 1 },
+  // v0.8 牧場・畑・料理
+  mush: { n: 'キノコ', food: 10 }, honeydew: { n: '甘露', food: 10 },
+  stove: { n: '調理台', place: 'stove' }, aphidHut: { n: 'アブラムシ小屋', place: 'aphidHut' }, mushBed: { n: 'キノコ床', place: 'mushBed' },
+  soup: { n: '草のスープ', food: 18, cool: 80, cooked: 1 }, roastSeed: { n: '焼き種', food: 32, cooked: 1 },
+  jam: { n: '果物ジャム', food: 40, heal: 25, cooked: 1 }, dango: { n: 'ミツ団子', food: 28, buff: 'spd', bt: 90, cooked: 1 },
+  mushStir: { n: 'キノコ炒め', food: 36, heal: 10, cooked: 1 }, glowSoup: { n: '光るキノコスープ', food: 20, buff: 'see', bt: 180, cooked: 1 },
+  stew: { n: '虫肉シチュー', food: 48, heal: 20, buff: 'tough', bt: 120, cooked: 1 }, jelly: { n: '甘露ゼリー', food: 30, heal: 40, cooked: 1 },
 };
+const BUFF_NAME = { spd: '足が速い', see: '暗い所がよく見える', tough: '体がかたい（ダメージ減）' };
 const ACC_INFO = {
   cloak: '鳥が来たとき止まっていれば見つからない', parasol: '日差しで体温が上がりにくい',
   sensor: 'アリジゴクの巣とカマキリが遠くから見える', floater: '水たまりで溺れない・遅くなりにくい',
@@ -97,6 +108,7 @@ const OBJ = {
   lamp: { solid: 0, hp: 10, light: 1 }, spike: { solid: 0, hp: 40 }, net: { solid: 0, hp: 30 },
   bed: { solid: 0, hp: 30 },
   shelter: { solid: 0, hp: 30, cover: 1 }, flag: { solid: 0, hp: 20 }, crystalLamp: { solid: 0, hp: 20, light: 1 },
+  stove: { solid: 1, hp: 50 }, aphidHut: { solid: 0, hp: 40, under: 1, farm: 1 }, mushBed: { solid: 0, hp: 40, under: 1, farm: 1 },
   // 自然にあるもの（壊すと素材が出る）
   branch: { solid: 1, hp: 36, natural: 1, drop: [['twig', 5]] },               // 落ちた枝
   bigLeaf: { solid: 0, hp: 12, natural: 1, drop: [['leaf', 4]] },              // 大きな落ち葉
@@ -141,21 +153,35 @@ const RECIPES = [
   { out: 'crystalLamp', n: 1, cost: { crystal: 1, glow: 1 }, bench: 1 },
   { out: 'jaw4', n: 1, cost: { mantisBlade: 2, shell: 2, silk: 2 }, bench: 1 },
   { out: 'armor3', n: 1, cost: { fossil: 4, shell: 2, silk: 2 }, bench: 1 },
+  // 牧場・畑・料理
+  { out: 'stove', n: 1, cost: { pebble: 4, twig: 3, dirt: 2 } },
+  { out: 'aphidHut', n: 1, cost: { leaf: 4, twig: 3, grass: 2 } },
+  { out: 'mushBed', n: 1, cost: { dirt: 4, leaf: 3, glow: 1 } },
+  { out: 'soup', n: 1, cost: { grass: 3, water: 1 }, cook: 1 },
+  { out: 'roastSeed', n: 2, cost: { seed: 3 }, cook: 1 },
+  { out: 'mushStir', n: 1, cost: { mush: 3 }, cook: 1 },
+  { out: 'jam', n: 1, cost: { fruit: 2, sugar: 1 }, cook: 1 },
+  { out: 'dango', n: 2, cost: { honeydew: 2, crumb: 3 }, cook: 1 },
+  { out: 'glowSoup', n: 1, cost: { glow: 2, water: 1 }, cook: 1 },
+  { out: 'stew', n: 1, cost: { meat: 2, water: 1, mush: 1 }, cook: 1 },
+  { out: 'jelly', n: 1, cost: { honeydew: 3, fruit: 1 }, cook: 1 },
 ];
 const EN = {
   spider: { idx: 0, n: 'クモ', hp: 45, spd: 125, dmg: 12, r: 13, detect: 260, chew: 10, drops: [['meat', 1, 1], ['silk', 1, 2]] },
   beetle: { idx: 1, n: 'カブトムシ', hp: 120, spd: 62, dmg: 22, r: 15, detect: 200, chew: 25, drops: [['meat', 1, 2], ['shell', 1, 2]] },
   mantis: { idx: 3, n: 'カマキリ', hp: 150, spd: 0, dmg: 10, r: 16, detect: 64, chew: 0, drops: [['mantisBlade', 1, 2], ['meat', 1, 2]] },
+  ladybug: { idx: 4, n: 'テントウムシ', hp: 50, spd: 112, dmg: 6, r: 12, detect: 0, chew: 0, drops: [['shell', 1, 1], ['meat', 1, 1]] },
   boss: { idx: 2, n: '巨大グモ', hp: 900, spd: 92, dmg: 24, r: 34, detect: 520, chew: 30, drops: [['shell', 4, 5], ['silk', 6, 8], ['meat', 4, 5]] },
 };
 // 地上の資源（巣からの距離ゾーンごと）
 const RES = [
-  { z: 1, item: 'crumb', n: 40 }, { z: 1, item: 'leaf', n: 40 }, { z: 1, item: 'twig', n: 30 },
-  { z: 2, item: 'seed', n: 35 }, { z: 2, item: 'pebble', n: 30 }, { z: 2, item: 'needle', n: 30 },
-  { z: 2, item: 'leaf', n: 20 }, { z: 2, item: 'twig', n: 25 },
-  { z: 3, item: 'fruit', n: 25 }, { z: 3, item: 'pebble', n: 20 }, { z: 3, item: 'needle', n: 20 }, { z: 3, item: 'seed', n: 15 },
+  { z: 1, item: 'crumb', n: 64 }, { z: 1, item: 'leaf', n: 64 }, { z: 1, item: 'twig', n: 48 },
+  { z: 2, item: 'seed', n: 84 }, { z: 2, item: 'pebble', n: 72 }, { z: 2, item: 'needle', n: 72 },
+  { z: 2, item: 'leaf', n: 48 }, { z: 2, item: 'twig', n: 60 },
+  { z: 3, item: 'fruit', n: 100 }, { z: 3, item: 'pebble', n: 80 }, { z: 3, item: 'needle', n: 80 }, { z: 3, item: 'seed', n: 60 },
+  { z: 3, item: 'leaf', n: 40 }, { z: 3, item: 'twig', n: 40 },
 ];
-const CUBES_WANT = 12;
+const CUBES_WANT = 22;
 
 // ---- アリ商店街 ----
 const SHOP_BUY = [
@@ -164,7 +190,8 @@ const SHOP_BUY = [
   { id: 'lamp', n: 1, price: 9 }, { id: 'bed', n: 1, price: 10 }, { id: 'armor1', n: 1, price: 16 }, { id: 'jaw2', n: 1, price: 22 },
   { id: 'water', n: 2, price: 4 }, { id: 'rope', n: 1, price: 6 }, { id: 'parasol', n: 1, price: 10 }, { id: 'floater', n: 1, price: 10 },
 ];
-const SELL = { crumb: 1, seed: 1, fruit: 2, meat: 2, grass: 1, leaf: 1, twig: 1, pebble: 1, needle: 1, clay: 2, root: 2, glow: 2, silk: 3, shell: 5, sugar: 3, cookie: 3, water: 1, fossil: 12, crystal: 22, mantisBlade: 8 };
+const SELL = { crumb: 1, seed: 1, fruit: 2, meat: 2, grass: 1, leaf: 1, twig: 1, pebble: 1, needle: 1, clay: 2, root: 2, glow: 2, silk: 3, shell: 5, sugar: 3, cookie: 3, water: 1, fossil: 12, crystal: 22, mantisBlade: 8,
+  mush: 1, honeydew: 3, soup: 3, roastSeed: 2, mushStir: 3, jam: 6, dango: 4, glowSoup: 4, stew: 6, jelly: 7 };
 const GACHA_COST = 10;
 const GACHA = [   // [確率%, ランク, アイテム, 個数]
   [15, 0, 'crumb', 5], [15, 0, 'leaf', 5], [15, 0, 'twig', 5], [15, 0, 'pebble', 4],
@@ -197,7 +224,7 @@ function vnoise(x, y, s) {
 }
 const LW = l => (isUnder(l) ? UW : l === 't' ? TW : SW);
 const LH = l => (isUnder(l) ? UH : l === 't' ? TH : SH);
-const zoneOf = (x, y) => { const d = Math.hypot(x - NEST.x, y - NEST.y) / T; return d < 30 ? 1 : d < 62 ? 2 : 3; };
+const zoneOf = (x, y) => { const d = Math.hypot(x - NEST.x, y - NEST.y) / T; return d < ZONE_R[0] ? 1 : d < ZONE_R[1] ? 2 : 3; };
 
 // ---- インベントリ（0〜7：ホットバー、8〜23：バッグ） ----
 const maxStack = id => ITEMS[id].stack || STACK;
@@ -223,7 +250,7 @@ function removeItem(inv, id, n) {
 const hasAll = (inv, need) => Object.entries(need).every(([id, n]) => countItem(inv, id) >= n);
 // 装備（大あご・よろい）
 const jawOf = p => (p.equip && p.equip.jaw ? ITEMS[p.equip.jaw.id].jaw : 1);
-const armorOf = p => (p.equip && p.equip.armor ? ITEMS[p.equip.armor.id].armor : 0);
+const armorOf = p => Math.min(0.8, (p.equip && p.equip.armor ? ITEMS[p.equip.armor.id].armor : 0) + (p.buffs && p.buffs.tough > 0 ? 0.15 : 0));
 const equipSlotOf = id => (ITEMS[id].jaw ? 'jaw' : ITEMS[id].armor ? 'armor' : ITEMS[id].acc ? 'acc' : null);
 const newEquip = () => ({ jaw: null, armor: null, acc1: null, acc2: null });
 const hasAcc = (p, id) => !!(p.equip && ((p.equip.acc1 && p.equip.acc1.id === id) || (p.equip.acc2 && p.equip.acc2.id === id)));
@@ -323,7 +350,7 @@ function inRock(w, x, y, pad) {
   return false;
 }
 function genTrees(w) {
-  for (let k = 0; k < 600 && w.trees.length < 8; k++) {
+  for (let k = 0; k < 2500 && w.trees.length < 26; k++) {
     let x, y;
     if (w.trees.length === 0) { const a = rand(0, 6.28), d = rand(16, 22) * T; x = NEST.x + Math.cos(a) * d; y = NEST.y + Math.sin(a) * d; }
     else { x = rand(500, SW * T - 500); y = rand(500, SH * T - 500); }
@@ -350,7 +377,7 @@ function genTrees(w) {
 }
 function genDeco(w) {
   const place = (t, r, n, solid) => {
-    for (let k = 0, made = 0; k < 400 && made < n; k++) {
+    for (let k = 0, made = 0; k < 1500 && made < n; k++) {
       const x = rand(200, SW * T - 200), y = rand(200, SH * T - 200);
       if (Math.hypot(x - NEST.x, y - NEST.y) < 360 || inRock(w, x, y, r + 40)) continue;
       w.deco.push({ t, x: Math.round(x), y: Math.round(y), r });
@@ -358,8 +385,8 @@ function genDeco(w) {
       made++;
     }
   };
-  place('cap', 44, 4, true); place('can', 70, 2, true); place('mush', 30, 14, true);
-  for (let k = 0; k < 90; k++) {
+  place('cap', 44, 12, true); place('can', 70, 6, true); place('mush', 30, 40, true);
+  for (let k = 0; k < 320; k++) {
     const x = rand(80, SW * T - 80), y = rand(80, SH * T - 80);
     if (!inRock(w, x, y, 20)) w.deco.push({ t: 'flower', x: Math.round(x), y: Math.round(y), r: 0, c: randi(0, 3) });
   }
@@ -373,27 +400,27 @@ function pickSpot(w, dMin, dMax, margin) {
   return { x: margin, y: margin };
 }
 function genSurface(w) {
-  w.lair = pickSpot(w, 72, 999, 450);                                     // 巨大グモの巣
-  for (let k = 0; k < 50; k++) { w.townPos = pickSpot(w, 42, 56, 300); if (dist(w.townPos, w.lair) > 1400) break; }   // アリ商店街の入口
+  w.lair = pickSpot(w, 100, 140, 450);                                    // 巨大グモの巣
+  for (let k = 0; k < 50; k++) { w.townPos = pickSpot(w, 52, 72, 300); if (dist(w.townPos, w.lair) > 1600) break; }   // アリ商店街の入口
   const blocks = [{ x: w.lair.x, y: w.lair.y, r: 380, k: 'block' }, { x: w.townPos.x, y: w.townPos.y, r: 200, k: 'block' }];
   w.rocks.push(...blocks);
   genTrees(w);
   genDeco(w);
   let tries = 0;
-  while (w.rocks.filter(o => !o.k).length < 140 && tries++ < 4000) {
+  while (w.rocks.filter(o => !o.k).length < 480 && tries++ < 14000) {
     const r = rand(18, 64), x = rand(r, SW * T - r), y = rand(r, SH * T - r);
     if (Math.hypot(x - NEST.x, y - NEST.y) < 260) continue;
     if (w.rocks.some(o => Math.hypot(o.x - x, o.y - y) < o.r + r + 40)) continue;
     w.rocks.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
   }
   tries = 0;
-  while (w.dens.length < 10 && tries++ < 2000) {
+  while (w.dens.length < 30 && tries++ < 6000) {
     const x = rand(100, SW * T - 100), y = rand(100, SH * T - 100);
-    if (Math.hypot(x - NEST.x, y - NEST.y) / T < 40 || inRock(w, x, y, 40) || dist({ x, y }, w.townPos) < 600) continue;
+    if (Math.hypot(x - NEST.x, y - NEST.y) / T < 45 || inRock(w, x, y, 40) || dist({ x, y }, w.townPos) < 600) continue;
     if (w.dens.some(o => Math.hypot(o.x - x, o.y - y) < 600)) continue;
     w.dens.push({ x: Math.round(x), y: Math.round(y) });
   }
-  for (let c = 0; c < 55; c++) {
+  for (let c = 0; c < 210; c++) {
     const cx = randi(4, SW - 5), cy = randi(4, SH - 5);
     if (Math.hypot((cx + 0.5) * T - NEST.x, (cy + 0.5) * T - NEST.y) < 120) continue;
     const n = randi(5, 12);
@@ -483,6 +510,7 @@ function createWorld(code) {
   for (const r of RES) for (let k = 0; k < r.n; k++) spawnRes(w, r);
   spawnNodes(w);
   spawnCubes(w);
+  spawnCritters(w);
   recomputeSupport(w);
   return w;
 }
@@ -493,6 +521,7 @@ function baseWorld(code) {
     items: new Map(), resCount: {}, saved: {}, players: {}, enemies: [], cracks: { u: new Map(), u2: new Map(), u3: new Map() }, cubes: [],
     lair: { x: 0, y: 0 }, townPos: { x: 0, y: 0 }, quest: null, queen: null,
     human: null, nextHuman: 2 + randi(0, 1), humanAt: rand(30, 110), prints: [],
+    critters: [],
     sand: [], pits: [], puddles: [], mantisSpots: [], wet: 0, bird: null, birdCd: 40, army: null, nextArmy: 4 + randi(0, 1), armyAt: rand(20, 120), repels: [],
     nextId: 1, tileQ: [], grassQ: [], objQ: new Map(), gameOver: false,
     secT: 1, saveT: 0, tickN: 0,
@@ -540,7 +569,7 @@ function playerSave(p) {
 function serialize(w) {
   for (const p of Object.values(w.players)) w.saved[p.name] = playerSave(p);
   return {
-    v: 2, code: w.code, savedAt: Date.now(), seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId, owner: w.owner, name: w.name,
+    v: 2, sw: SW, sh: SH, code: w.code, savedAt: Date.now(), seed: w.seed, day: w.day, time: w.time, isNight: w.isNight, nextId: w.nextId, owner: w.owner, name: w.name,
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'),
     under2: Buffer.from(w.grids.u2).toString('base64'), under3: Buffer.from(w.grids.u3).toString('base64'),
@@ -550,9 +579,11 @@ function serialize(w) {
     saved: w.saved, lair: w.lair, townPos: w.townPos, quest: w.quest, queen: w.queen,
     nextHuman: w.nextHuman, humanAt: w.humanAt,
     sand: w.sand, pits: w.pits, puddles: w.puddles, mantisSpots: w.mantisSpots, nextArmy: w.nextArmy, armyAt: w.armyAt,
+    critters: w.critters.filter(c => !c.dead).map(c => ({ k: c.k, layer: c.layer, x: Math.round(c.x), y: Math.round(c.y), hx: Math.round(c.hx), hy: Math.round(c.hy), owner: c.owner, tame: c.tame })),
   };
 }
 function deserialize(code, d) {
+  const grow = (d.sw || OLD_SW) !== SW || (d.sh || OLD_SH) !== SH ? shiftSave(d) : null;
   const w = baseWorld(code);
   Object.assign(w, {
     seed: d.seed, day: d.day, time: d.time, isNight: d.isNight, nextId: d.nextId || 1, rocks: d.rocks, dens: d.dens,
@@ -590,6 +621,9 @@ function deserialize(code, d) {
   if (w.cubes.length < CUBES_WANT) spawnCubes(w);
   if (d.pits) Object.assign(w, { sand: d.sand, pits: d.pits, puddles: d.puddles, mantisSpots: d.mantisSpots, nextArmy: d.nextArmy || w.day + 4, armyAt: d.armyAt || 60 });
   else genHazards(w);
+  if (grow) { growWorld(w, grow); spawnCubes(w); }
+  for (const c of d.critters || []) newCritter(w, c.k, c.x, c.y, c.layer, { hx: c.hx ?? c.x, hy: c.hy ?? c.y, owner: c.owner || null, tame: c.tame || 0 });
+  spawnCritters(w);
   spawnMantises(w);
   recomputeSupport(w);
   return w;
@@ -722,7 +756,7 @@ function give(w, p, id, n) {
 const emitInv = p => io.to(p.id).emit('inv', { inv: p.inv, sel: p.sel, equip: p.equip });
 function setObj(w, l, idx, o) {
   if (o) w.objs[l].set(idx, o); else w.objs[l].delete(idx);
-  w.objQ.set(l + idx, { l, i: idx, o: o ? { t: o.t, hp: Math.round(o.hp), a: o.a || 0 } : null });
+  w.objQ.set(l + idx, { l, i: idx, o: o ? objView(o) : null });
 }
 
 // ================= 衝突 =================
@@ -736,7 +770,7 @@ function solidAt(w, l, tx, ty) {
 }
 function collide(w, l, e, r) {
   let hit = null;
-  if (l === 's') for (const o of w.rocks) {
+  if (l === 's') for (const o of (r <= 60 ? rocksAt(w, e.x, e.y) : w.rocks)) {
     const dx = e.x - o.x, dy = e.y - o.y, min = o.r + r;
     if (Math.abs(dx) < min && Math.abs(dy) < min) {
       const d = Math.hypot(dx, dy);
@@ -868,7 +902,7 @@ function makePlayer(w, id, name) {
   const p = {
     id, name, color: COLORS[Object.keys(w.players).length % COLORS.length],
     layer: 'u', x: UCX * T, y: UCY * T, a: 0, hp: 100, hunger: 100, equip: newEquip(), slowT: 0, grab: null,
-    heat: 0, trap: null, immuneT: 0, lastMoveAt: Date.now(), ddown: false,
+    heat: 0, trap: null, immuneT: 0, lastMoveAt: Date.now(), ddown: false, buffs: {}, ride: null,
     inv: new Array(INV_SIZE).fill(null), sel: 0, dead: false, respawn: 0, bed: null, sleep: false,
     ax: 0, ay: 0, lmb: false, atkCd: 0, biteT: 0, dig: null, tpSeq: 1, lastPos: Date.now(), openChest: null, warnT: 0,
   };
@@ -885,6 +919,8 @@ function teleport(p, l, x, y) {
 function killPlayer(w, p, why, buried) {
   if (p.dead) return;
   if (p.grab) releaseGrab(w, p);
+  if (p.ride) dismount(w, p);
+  p.buffs = {};
   p.dead = true; p.respawn = 6; p.dig = null; p.lmb = false; p.sleep = false;
   if (!buried) dropItems(w, p.layer, Math.round(p.x), Math.round(p.y), [...p.inv, p.equip.jaw, p.equip.armor, p.equip.acc1, p.equip.acc2]);
   p.inv = new Array(INV_SIZE).fill(null);
@@ -915,6 +951,7 @@ function nearObj(w, p, types, range) {
 }
 function canPlace(w, l, tx, ty, t) {
   if (l === 't') return false;
+  if (OBJ[t].under && !isUnder(l)) return false;
   if (tx < 0 || ty < 0 || tx >= LW(l) || ty >= LH(l)) return false;
   const idx = ty * LW(l) + tx, cx = (tx + 0.5) * T, cy = (ty + 0.5) * T;
   if (isUnder(l)) { if (w.grids[l][idx] !== U.OPEN) return false; }
@@ -936,6 +973,11 @@ function destroyObj(w, l, idx, byPlayer) {
   const tx = idx % LW(l), ty = Math.floor(idx / LW(l)), cx = (tx + 0.5) * T, cy = (ty + 0.5) * T;
   setObj(w, l, idx, null);
   if (o.items) dropItems(w, l, cx, cy, o.items);
+  if (o.t === 'aphidHut') {                                  // 小屋を壊すとアブラムシが出てくる
+    for (let k = 0; k < (o.aph || 0); k++) newCritter(w, 'aphid', cx + rand(-14, 14), cy + rand(-14, 14), l);
+    dropItems(w, l, cx, cy, [o.food ? { id: 'grass', n: o.food } : null, o.out ? { id: 'honeydew', n: o.out } : null]);
+  }
+  if (o.t === 'mushBed') dropItems(w, l, cx, cy, [o.leaf ? { id: 'leaf', n: o.leaf } : null, o.rm ? { id: 'mush', n: o.rm } : null, o.rg ? { id: 'glow', n: o.rg } : null]);
   if (byPlayer) {
     if (OBJ[o.t].drop) for (const [id, n] of OBJ[o.t].drop) give(w, byPlayer, id, n);
     else give(w, byPlayer, o.t, 1);
@@ -952,7 +994,7 @@ function damageObj(w, l, idx, amount) {
   if (!o || OBJ[o.t].fixed || OBJ[o.t].natural) return;
   o.hp -= amount;
   if (o.hp <= 0) destroyObj(w, l, idx, null);
-  else w.objQ.set(l + idx, { l, i: idx, o: { t: o.t, hp: Math.round(o.hp), a: o.a || 0 } });
+  else w.objQ.set(l + idx, { l, i: idx, o: objView(o) });
 }
 
 function handleHold(w, p) {
@@ -963,7 +1005,7 @@ function handleHold(w, p) {
     const r = EN[e.type].r;
     if (Math.hypot(e.x - p.ax, e.y - p.ay) < r + 14 && Math.hypot(e.x - p.x, e.y - p.y) < REACH + r) {
       p.atkCd = 0.4; p.biteT = 0.15;
-      e.hp -= jaw.atk; e.hitT = 0.15;
+      e.hp -= jaw.atk; e.hitT = 0.15; e.aggro = 6;
       if (e.type === 'mantis') {                         // 攻撃されたカマキリは獲物を放す
         e.revealT = 4;
         const h = e.holding && w.players[e.holding];
@@ -1026,6 +1068,7 @@ function updatePlayers(w) {
   for (const p of Object.values(w.players)) {
     if (p.dead) { p.respawn -= DT; if (p.respawn <= 0) respawnPlayer(w, p); continue; }
     p.atkCd -= DT; p.biteT -= DT; p.warnT -= DT; p.slowT -= DT; p.immuneT -= DT;
+    for (const k in p.buffs) { p.buffs[k] -= DT; if (p.buffs[k] <= 0) { delete p.buffs[k]; msgTo(p, `${BUFF_NAME[k]}効果が切れた`); } }
     if (p.trap) { updateTrap(w, p); continue; }                 // つかまっている間はもがくだけ
     updateOutdoor(w, p);
     if (p.dead) continue;
@@ -1085,6 +1128,7 @@ function updateEnemies(w) {
     if (e.dead) continue;
     if (e.type === 'boss') { if (e.hp <= 0) killEnemy(w, e); else updateBoss(w, e, alive); continue; }
     if (e.type === 'mantis') { updateMantis(w, e, alive); continue; }
+    if (e.type === 'ladybug') { updateLadybug(w, e, alive); continue; }
     const s = EN[e.type];
     e.atkCd -= DT; e.hitT -= DT; e.avoidT -= DT; e.life += DT;
     if (e.retreat && e.life > 400) { e.dead = true; continue; }
@@ -1105,7 +1149,7 @@ function updateEnemies(w) {
       e.a = Math.atan2(tgt.y - e.y, tgt.x - e.x);
       if (e.atkCd <= 0) {
         e.atkCd = 1.0;
-        tgt.hp -= s.dmg * (1 - (tgt === q ? 0 : armorOf(tgt)));
+        tgt.hp -= s.dmg * (tgt === q ? 1 : dmgMul(w, tgt));
         if (tgt.sleep) { wake(tgt); msgTo(tgt, '⚠ 攻撃されて目が覚めた！'); }
         if (tgt === q) { if (q.hp <= 0) { q.faint = 10; q.hp = 0; msg(w, '⚠ 女王が気を失った！ 10秒守り抜け！'); } }
         else if (tgt.hp <= 0) killPlayer(w, tgt, `${s.n}にやられた…`);
@@ -1175,9 +1219,10 @@ function genQuest(w) {
     return null;
   };
   const far = () => randomSurfacePoint(w, 3) || { x: 400, y: 400 };
-  for (const t of [...w.trees].sort((a, b) => dist(b, NEST) - dist(a, NEST))) { q.pts.c2 = placeNear(t.x, t.y, t.r + 30, t.r + 80, 'cocoon'); if (q.pts.c2) break; }
+  for (const t of [...w.trees].sort((a, b) => Math.abs(dist(a, NEST) - 80 * T) - Math.abs(dist(b, NEST) - 80 * T))) { q.pts.c2 = placeNear(t.x, t.y, t.r + 30, t.r + 80, 'cocoon'); if (q.pts.c2) break; }
   if (!q.pts.c2) { const p = far(); q.pts.c2 = placeNear(p.x, p.y, 0, 60, 'cocoon'); }
-  for (const c of w.deco.filter(d => d.t === 'can').concat(w.deco.filter(d => d.t === 'cap'))) { q.pts.c3 = placeNear(c.x, c.y, c.r + 20, c.r + 45, 'clue3'); if (q.pts.c3) break; }
+  const byMid = (a, b) => Math.abs(dist(a, NEST) - 75 * T) - Math.abs(dist(b, NEST) - 75 * T);
+  for (const c of w.deco.filter(d => d.t === 'can').sort(byMid).concat(w.deco.filter(d => d.t === 'cap').sort(byMid))) { q.pts.c3 = placeNear(c.x, c.y, c.r + 20, c.r + 45, 'clue3'); if (q.pts.c3) break; }
   if (!q.pts.c3) { const p = far(); q.pts.c3 = placeNear(p.x, p.y, 0, 60, 'clue3'); }
   const ltx = Math.floor(w.lair.x / T), lty = Math.floor(w.lair.y / T);
   w.objs.s.set(lty * SW + ltx, { t: 'queenCocoon', hp: OBJ.queenCocoon.hp });
@@ -1402,7 +1447,7 @@ function sunInfo(w) {                       // 太陽の向き（影がのびる
 function shadeAt(w, x, y) {                 // 上に何かあって、鳥と日差しから守られているか
   for (const t of w.trees) if (Math.hypot(t.x - x, t.y - y) < t.r + 240) return true;
   const sd = sunInfo(w);
-  for (const o of w.rocks) {
+  for (const o of rocksAt(w, x, y)) {
     if (o.k || o.r < 26 || Math.abs(o.x - x) > o.r * 3 || Math.abs(o.y - y) > o.r * 3) continue;
     if (Math.hypot(o.x + sd.dx * o.r * sd.len - x, o.y + sd.dy * o.r * sd.len - y) < o.r * 0.95) return true;
   }
@@ -1427,7 +1472,7 @@ function genHazards(w) {
   const far = (x, y, pad) => x > 200 && y > 200 && x < SW * T - 200 && y < SH * T - 200 && Math.hypot(x - NEST.x, y - NEST.y) > SAFE_R + pad
     && !inRock(w, x, y, 20) && dist({ x, y }, w.lair) > 520 && dist({ x, y }, w.townPos) > 320;
   w.sand = []; w.pits = [];                  // 砂地とアリジゴク
-  for (let k = 0; k < 500 && w.sand.length < 12; k++) {
+  for (let k = 0; k < 1500 && w.sand.length < 32; k++) {
     const x = rand(0, SW * T), y = rand(0, SH * T), r = rand(130, 210);
     if (zoneOf(x, y) === 1 || !far(x, y, r) || w.sand.some(s => Math.hypot(s.x - x, s.y - y) < s.r + r + 120)) continue;
     w.sand.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
@@ -1437,14 +1482,14 @@ function genHazards(w) {
     }
   }
   w.puddles = [];                            // 雨が降るとできる水たまり（くぼみ）
-  for (let k = 0; k < 500 && w.puddles.length < 26; k++) {
+  for (let k = 0; k < 1500 && w.puddles.length < 70; k++) {
     const x = rand(150, SW * T - 150), y = rand(150, SH * T - 150), r = rand(55, 120);
     if (Math.hypot(x - NEST.x, y - NEST.y) < 160 + r || inRock(w, x, y, r * 0.6) || w.sand.some(sd => Math.hypot(sd.x - x, sd.y - y) < sd.r + r) || dist({ x, y }, w.townPos) < 200 || w.puddles.some(q => Math.hypot(q.x - x, q.y - y) < q.r + r + 60)) continue;
     w.puddles.push({ x: Math.round(x), y: Math.round(y), r: Math.round(r) });
   }
   w.mantisSpots = [];                        // 草むらにひそむカマキリ
   const cells = [...w.grass.keys()].filter(i => { const x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T; return zoneOf(x, y) >= 2 && far(x, y, 0); });
-  for (let k = 0; k < 300 && w.mantisSpots.length < 10 && cells.length; k++) {
+  for (let k = 0; k < 900 && w.mantisSpots.length < 26 && cells.length; k++) {
     const i = cells[randi(0, cells.length - 1)], x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T;
     if (w.mantisSpots.some(m => Math.hypot(m.x - x, m.y - y) < 600)) continue;
     w.mantisSpots.push({ x: Math.round(x), y: Math.round(y), back: 0 });
@@ -1460,6 +1505,7 @@ function spawnMantises(w) {
 function safeTp(w, p, x, y) { const pos = { x, y }; collide(w, p.layer, pos, PR); teleport(p, p.layer, pos.x, pos.y); }
 function setTrap(w, p, tr) {
   if (p.grab) releaseGrab(w, p);
+  if (p.ride) dismount(w, p);
   p.trap = { n: 0, ...tr }; p.lmb = false; p.dig = null; p.sleep = false;
   if (tr.x !== undefined) teleport(p, p.layer, tr.x, tr.y);
 }
@@ -1571,7 +1617,10 @@ function updateBird(w) {
 // ---- 軍隊アリの大行進 ----
 function startArmy(w) {
   const axis = Math.random() < 0.5 ? 'x' : 'y', dir = Math.random() < 0.5 ? 1 : -1, max = axis === 'x' ? SW * T : SH * T;
-  w.army = { axis, dir, pos: dir > 0 ? -250 : max + 250, speed: 85, warn: 15, max };
+  const out = Object.values(w.players).filter(p => !p.dead && p.layer === 's');      // 外にいるアリのまわりを通る
+  const c = out.length ? out.reduce((a, p) => a + (axis === 'x' ? p.x : p.y), 0) / out.length : (axis === 'x' ? NEST.x : NEST.y);
+  const from = clamp(c - dir * 2600, -250, max + 250), to = clamp(c + dir * 2600, -250, max + 250);
+  w.army = { axis, dir, pos: from, end: to, speed: 95, warn: 15, max };
   msg(w, '🐜 遠くから地鳴り…赤い軍隊アリの大行進が来る！ 巣に逃げるか「刺激臭の玉」で身を守れ！');
   io.to(w.code).emit('armyCome');
 }
@@ -1583,7 +1632,7 @@ function updateArmy(w) {
   const inBand = (x, y) => Math.abs((a.axis === 'x' ? x : y) - a.pos) < 130;
   for (const p of Object.values(w.players)) {
     if (p.dead || p.layer !== 's' || !inBand(p.x, p.y) || repelled(w, p.x, p.y)) continue;
-    p.hp -= 18 * DT * (1 - armorOf(p)); wake(p);
+    p.hp -= 18 * DT * dmgMul(w, p); wake(p);
     if (p.warnT <= 0) { msgTo(p, '⚠ 軍隊アリに噛まれている！ 列から逃げろ！'); p.warnT = 3; }
     if (p.hp <= 0) killPlayer(w, p, '軍隊アリの大行進に飲み込まれた…');
   }
@@ -1598,7 +1647,8 @@ function updateArmy(w) {
     }
     for (const [i, g] of w.grass) if (g > 0 && inBand((i % SW + 0.5) * T, (Math.floor(i / SW) + 0.5) * T)) { w.grass.set(i, 0); w.grassQ.push([i, 0]); }
   }
-  if ((a.dir > 0 && a.pos > a.max + 250) || (a.dir < 0 && a.pos < -250)) {
+  const end = a.end !== undefined ? a.end : (a.dir > 0 ? a.max + 250 : -250);
+  if ((a.dir > 0 && a.pos > end) || (a.dir < 0 && a.pos < end)) {
     w.army = null; w.nextArmy = w.day + randi(4, 6); w.armyAt = rand(20, 120);
     msg(w, '軍隊アリの行進が通り過ぎていった…');
   }
@@ -1625,6 +1675,261 @@ function updateOutdoor(w, p) {
   }
 }
 
+// ================= 生き物（アブラムシ・ダンゴムシ）・牧場・キノコ畑 =================
+const CR_KIND = { aphid: 0, pill: 1 };
+const APHID_WANT = 34, PILL_WANT = 16, FOLLOW_MAX = 3, HUT_CAP = 3, HUT_FOOD = 20, BED_LEAF = 8, BED_MAX = 10;
+function newCritter(w, k, x, y, layer, extra) {
+  const c = { id: w.nextId++, k, layer: layer || 's', x, y, a: rand(0, 6.28), hx: x, hy: y, fol: null, owner: null, tame: 0, rider: null, roll: 0, wt: 0, wa: rand(0, 6.28), still: false, ...(extra || {}) };
+  w.critters.push(c);
+  return c;
+}
+function spawnCritters(w) {
+  const wild = k => w.critters.filter(c => c.k === k && !c.fol && !c.owner && c.layer === 's').length;
+  const cells = [...w.grass.keys()];
+  for (let k = 0; k < 600 && cells.length && wild('aphid') < APHID_WANT; k++) {          // アブラムシは草むらにいる
+    const i = cells[randi(0, cells.length - 1)], x = (i % SW + 0.5) * T, y = (Math.floor(i / SW) + 0.5) * T;
+    if ((zoneOf(x, y) === 1 && Math.random() < 0.7) || inRock(w, x, y, 10) || inPit(w, x, y, 40)) continue;
+    if (w.critters.some(c => c.k === 'aphid' && Math.abs(c.x - x) < 120 && Math.abs(c.y - y) < 120)) continue;
+    newCritter(w, 'aphid', x, y);
+  }
+  for (let k = 0; k < 400 && wild('pill') < PILL_WANT; k++) {
+    const pt = randomSurfacePoint(w, randi(1, 3));
+    if (!pt || w.critters.some(c => c.k === 'pill' && dist(c, pt) < 700)) continue;
+    newCritter(w, 'pill', pt.x, pt.y);
+  }
+}
+function objView(o) {                                // 置物の見た目＋中身（牧場・畑の数）
+  const v = { t: o.t, hp: Math.round(o.hp), a: o.a || 0 };
+  if (o.t === 'aphidHut') v.d = [o.aph || 0, o.food || 0, o.out || 0];
+  else if (o.t === 'mushBed') v.d = [o.leaf || 0, Math.round((o.g || 0) * 100), o.rm || 0, o.rg || 0];
+  return v;
+}
+const touchObj = (w, l, i) => { const o = w.objs[l].get(i); if (o) w.objQ.set(l + i, { l, i, o: objView(o) }); };
+function findObjNear(w, l, x, y, type, r, ok) {
+  const W = LW(l), tx = Math.floor(x / T), ty = Math.floor(y / T), n = Math.ceil(r / T);
+  for (let dy = -n; dy <= n; dy++) for (let dx = -n; dx <= n; dx++) {
+    const i = (ty + dy) * W + tx + dx, o = w.objs[l].get(i);
+    if (!o || o.t !== type || (ok && !ok(o))) continue;
+    if (Math.hypot((tx + dx + 0.5) * T - x, (ty + dy + 0.5) * T - y) < r) return { i, o };
+  }
+  return null;
+}
+function mount(w, p, c) {
+  if (p.grab) releaseGrab(w, p);
+  c.rider = p.id; p.ride = c.id; c.x = p.x; c.y = p.y;
+  msgTo(p, '🐾 ダンゴムシに乗った！（もう一度Eで降りる。攻撃されると丸まって守ってくれる）');
+}
+function dismount(w, p, c) {
+  if (!c && p) c = w.critters.find(x => x.id === p.ride);
+  if (p) p.ride = null;
+  if (c) { c.rider = null; c.hx = c.x; c.hy = c.y; c.wt = 3; c.still = true; }
+}
+const dmgMul = (w, p) => {                           // 受けるダメージの倍率（よろい・ダンゴムシ）
+  if (p.ride) { const c = w.critters.find(x => x.id === p.ride); if (c) c.roll = 1; return (1 - armorOf(p)) * 0.35; }
+  return 1 - armorOf(p);
+};
+function updateCritters(w) {
+  for (const c of w.critters) {
+    if (c.dead) continue;
+    c.roll -= DT;
+    if (c.rider) {                                   // 乗られているダンゴムシ
+      const p = w.players[c.rider];
+      if (!p || p.dead || p.ride !== c.id || p.layer !== c.layer) { if (p && p.ride === c.id) p.ride = null; c.rider = null; c.hx = c.x; c.hy = c.y; continue; }
+      c.x = p.x; c.y = p.y; c.a = p.a;
+      continue;
+    }
+    if (c.fol) {                                     // ついてくるアブラムシ
+      const p = w.players[c.fol];
+      if (!p || p.dead || p.layer !== c.layer) { c.fol = null; c.hx = c.x; c.hy = c.y; continue; }
+      const d = dist(c, p);
+      if (d > 700) { c.fol = null; c.hx = c.x; c.hy = c.y; msgTo(p, '🐛 アブラムシがはぐれてしまった…'); continue; }
+      if (d > 36) { const sp = Math.min(125, 55 + d * 0.6), ang = Math.atan2(p.y - c.y, p.x - c.x); c.a = ang; c.x += Math.cos(ang) * sp * DT; c.y += Math.sin(ang) * sp * DT; collide(w, c.layer, c, 7); }
+      if (isUnder(c.layer) && (w.tickN + c.id) % 10 === 0) {                     // 小屋のそばに来たら住みつく
+        const hut = findObjNear(w, c.layer, c.x, c.y, 'aphidHut', 96, o => (o.aph || 0) < HUT_CAP) || findObjNear(w, c.layer, p.x, p.y, 'aphidHut', 80, o => (o.aph || 0) < HUT_CAP);
+        if (hut) {
+          hut.o.aph = (hut.o.aph || 0) + 1; c.dead = true; touchObj(w, c.layer, hut.i);
+          msgTo(p, `🐛 アブラムシが小屋に住みついた（${hut.o.aph}/${HUT_CAP}）。草を入れておくと毎朝「甘露」ができる`);
+        }
+      }
+      continue;
+    }
+    const R = c.owner ? 30 : c.k === 'aphid' ? 70 : 170, sp = c.k === 'aphid' ? 16 : 38;   // ふらふら歩く
+    c.wt -= DT;
+    if (c.wt <= 0) { c.wt = rand(1.5, 4); c.wa = Math.hypot(c.x - c.hx, c.y - c.hy) > R ? Math.atan2(c.hy - c.y, c.hx - c.x) : rand(0, 6.28); c.still = Math.random() < 0.45; }
+    if (!c.still) { c.a = c.wa; c.x += Math.cos(c.wa) * sp * DT; c.y += Math.sin(c.wa) * sp * DT; if (collide(w, c.layer, c, 8)) c.wt = 0; }
+  }
+  w.critters = w.critters.filter(c => !c.dead);
+}
+function critterUse(w, p, c) {
+  if (c.k === 'aphid') {
+    if (c.fol === p.id) { c.fol = null; c.hx = c.x; c.hy = c.y; return msgTo(p, '🐛 アブラムシをその場で待たせた'); }
+    if (c.fol) return msgTo(p, 'このアブラムシは仲間についていっている');
+    if (w.critters.filter(x => x.fol === p.id).length >= FOLLOW_MAX) return msgTo(p, `いっしょに連れて行けるのは${FOLLOW_MAX}匹まで`);
+    c.fol = p.id;
+    return msgTo(p, '🐛 アブラムシがついてくる！ 巣の中の「アブラムシ小屋」まで連れて行こう（テントウムシに注意）');
+  }
+  if (c.owner) { if (!p.ride) mount(w, p, c); return; }
+  const h = p.inv[p.sel];
+  if (h && h.id === 'leaf') {
+    h.n--; if (!h.n) p.inv[p.sel] = null;
+    emitInv(p);
+    c.tame++; c.still = true; c.wt = 2;
+    if (c.tame >= 3) { c.owner = p.name; c.hx = c.x; c.hy = c.y; msg(w, `🐾 ${p.name}がダンゴムシと仲良くなった！ Eで乗れる（みんな乗れる）`); }
+    else msgTo(p, `🐾 ダンゴムシが葉っぱを食べた（あと${3 - c.tame}枚で仲良くなれそう）`);
+    return;
+  }
+  msgTo(p, '🐾 野生のダンゴムシ。葉っぱを持ってEであげると仲良くなれそう');
+}
+function farmUse(w, p, l, i, o) {                    // 小屋・キノコ床をEで使う
+  const h = p.inv[p.sel], did = [];
+  const putIn = (id, max, key) => {
+    if (!h || h.id !== id) return;
+    const k = Math.min(h.n, max - (o[key] || 0));
+    if (k <= 0) return;
+    h.n -= k; if (!h.n) p.inv[p.sel] = null;
+    o[key] = (o[key] || 0) + k; did.push(`${ITEMS[id].n}を${k}つ入れた`);
+  };
+  if (o.t === 'aphidHut') {
+    if (o.out > 0) { give(w, p, 'honeydew', o.out); did.push(`甘露を${o.out}個とった`); o.out = 0; }
+    putIn('grass', HUT_FOOD, 'food');
+    if (!did.length) msgTo(p, `🐛 アブラムシ ${o.aph || 0}/${HUT_CAP}　草 ${o.food || 0}/${HUT_FOOD}　甘露 ${o.out || 0}　${o.aph ? '（草を持ってEで入れると、毎朝1匹につき2個の甘露）' : '（外のアブラムシにEで声をかけて連れてこよう）'}`);
+  } else {
+    if (o.rm || o.rg) { if (o.rm) give(w, p, 'mush', o.rm); if (o.rg) give(w, p, 'glow', o.rg); did.push(`キノコを${o.rm || 0}個${o.rg ? `・光るキノコを${o.rg}個` : ''}とった`); o.rm = 0; o.rg = 0; }
+    putIn('leaf', BED_LEAF, 'leaf');
+    if (!did.length) msgTo(p, `🍄 葉っぱ ${o.leaf || 0}/${BED_LEAF}　育ち具合 ${Math.round((o.g || 0) * 100)}%　${o.leaf ? '（深い階ほど早く育つ）' : '（葉っぱを持ってEで入れると育ち始める）'}`);
+  }
+  if (did.length) msgTo(p, (o.t === 'aphidHut' ? '🐛 ' : '🍄 ') + did.join('・'));
+  emitInv(p); touchObj(w, l, i);
+}
+function farmMorning(w) {                            // 朝：アブラムシが草を食べて甘露を出す
+  for (const l of UL) for (const [i, o] of w.objs[l]) {
+    if (o.t !== 'aphidHut' || !o.aph) continue;
+    const fed = Math.min(o.aph, o.food || 0);
+    o.food = (o.food || 0) - fed; o.out = Math.min(12, (o.out || 0) + fed * 2);
+    if (fed < o.aph) { o.starve = (o.starve || 0) + 1; if (o.starve >= 2) { o.aph--; o.starve = 0; msg(w, '🐛 草が足りなくて、小屋のアブラムシが1匹いなくなった…'); } }
+    else o.starve = 0;
+    touchObj(w, l, i);
+  }
+}
+function farmTick(w) {                               // 1秒ごと：キノコが育つ
+  const rate = { u: 1, u2: 1.4, u3: 1.8 }, yieldOf = { u: [2, 0], u2: [2, 1], u3: [1, 2] };
+  for (const l of UL) for (const [i, o] of w.objs[l]) {
+    if (o.t !== 'mushBed' || !(o.leaf > 0) || (o.rm || 0) + (o.rg || 0) >= BED_MAX) continue;
+    o.g = (o.g || 0) + rate[l] / (DAY_LEN + NIGHT_LEN);
+    if (o.g >= 1) { o.g = 0; o.leaf = Math.max(0, o.leaf - 2); o.rm = (o.rm || 0) + yieldOf[l][0]; o.rg = (o.rg || 0) + yieldOf[l][1]; touchObj(w, l, i); }
+    else if ((w.day * 1000 + Math.floor(w.time)) % 10 === 0) touchObj(w, l, i);
+  }
+}
+function updateLadybug(w, e, alive) {               // テントウムシ：連れているアブラムシを狙う
+  const s = EN.ladybug;
+  e.atkCd -= DT; e.hitT -= DT; e.life += DT; e.aggro = (e.aggro || 0) - DT;
+  if (e.hp <= 0) return killEnemy(w, e);
+  if (w.isNight || e.life > 150) { e.dead = true; return; }
+  let tgt = null, bd = 700;
+  if (!e.full) for (const c of w.critters) {
+    if (c.k !== 'aphid' || !c.fol || c.layer !== 's' || inSafeZone(c.x, c.y)) continue;
+    const d = dist(c, e); if (d < bd) { bd = d; tgt = c; }
+  }
+  let goal = tgt;
+  if (e.aggro > 0) { let pd = 280; for (const p of alive) if (p.layer === 's' && !p.trap && dist(p, e) < pd) { pd = dist(p, e); goal = p; } }
+  if (!goal) {
+    if (e.life > 25) { e.dead = true; return; }                                  // 獲物がいなければ飛んでいく
+    e.wt -= DT; if (e.wt <= 0) { e.wa += rand(-1.5, 1.5); e.wt = rand(1, 2); }
+    e.x += Math.cos(e.wa) * s.spd * 0.4 * DT; e.y += Math.sin(e.wa) * s.spd * 0.4 * DT; e.a = e.wa; collide(w, 's', e, s.r * 0.8);
+    return;
+  }
+  const d = dist(goal, e);
+  e.a = Math.atan2(goal.y - e.y, goal.x - e.x);
+  if (goal === tgt && d < 16) {
+    tgt.dead = true; e.full = true; e.life = Math.max(e.life, 130);
+    const p = w.players[tgt.fol];
+    msg(w, `🐞 テントウムシに${p ? p.name + 'の' : ''}アブラムシが食べられた！`);
+    return;
+  }
+  if (goal !== tgt && d < s.r + PR + 6) {
+    if (e.atkCd <= 0) { e.atkCd = 1; goal.hp -= s.dmg * dmgMul(w, goal); if (goal.hp <= 0) killPlayer(w, goal, 'テントウムシにやられた…'); }
+    return;
+  }
+  e.x += Math.cos(e.a) * s.spd * DT; e.y += Math.sin(e.a) * s.spd * DT;
+  collide(w, 's', e, s.r * 0.8);
+}
+function spawnLadybugs(w) {                          // 1秒ごと：アブラムシを連れていると、テントウムシが来ることがある
+  if (w.isNight || w.rain > 0) return;
+  const fol = w.critters.filter(c => c.k === 'aphid' && c.fol && c.layer === 's' && !inSafeZone(c.x, c.y));
+  if (!fol.length) return;
+  const n = w.enemies.filter(e => e.type === 'ladybug').length;
+  if (n >= Math.min(5, 1 + fol.length) || Math.random() > 0.035 * fol.length) return;
+  const c = fol[randi(0, fol.length - 1)], a = rand(0, 6.28), d = rand(480, 620);
+  const pos = { x: clamp(c.x + Math.cos(a) * d, 60, SW * T - 60), y: clamp(c.y + Math.sin(a) * d, 60, SH * T - 60) };
+  if (inSafeZone(pos.x, pos.y)) return;
+  const e = spawnEnemy(w, 'ladybug', pos, false);
+  Object.assign(e, { x: pos.x, y: pos.y, wt: 0 });
+  const p = w.players[c.fol];
+  if (p) msgTo(p, '🐞 テントウムシが飛んできた！ アブラムシが狙われている！');
+}
+
+// ================= 古いワールド（200×150）を広げる =================
+function shiftSave(d) {                              // 保存データの地上の座標を、広くなった地図の真ん中へずらす
+  const ow = d.sw || OLD_SW, oh = d.sh || OLD_SH;
+  const otx = Math.round((SW - ow) / 2), oty = Math.round((SH - oh) / 2), ox = otx * T, oy = oty * T;
+  const mv = o => { if (o && typeof o.x === 'number') { o.x += ox; o.y += oy; } };
+  const ri = i => (Math.floor(i / ow) + oty) * SW + (i % ow) + otx;
+  (d.rocks || []).forEach(mv); (d.dens || []).forEach(mv); (d.deco || []).forEach(mv);
+  for (const t of d.trees || []) { mv(t); for (const pts of t.roots || []) for (const q of pts) { q[0] += ox; q[1] += oy; } }
+  d.grass = (d.grass || []).map(([i, v]) => [ri(i), v]);
+  if (d.objs) d.objs.s = (d.objs.s || []).map(([i, o]) => [ri(i), o]);
+  for (const it of d.items || []) if (it.layer === 's') mv(it);
+  (d.cubes || []).forEach(mv);
+  for (const k in d.saved || {}) { const sp = d.saved[k]; if (sp.layer === 's') mv(sp); if (sp.bed && sp.bed.l === 's') sp.bed.i = ri(sp.bed.i); }
+  mv(d.lair); mv(d.townPos);
+  if (d.quest && d.quest.pts) for (const k in d.quest.pts) { const q = d.quest.pts[k]; if (q && q.l === 's') mv(q); }
+  if (d.queen && d.queen.layer === 's') mv(d.queen);
+  for (const k of ['sand', 'pits', 'puddles', 'mantisSpots']) (d[k] || []).forEach(mv);
+  for (const c of d.critters || []) if (c.layer === 's') { mv(c); c.hx += ox; c.hy += oy; }
+  d.sw = SW; d.sh = SH;
+  return { x0: ox, y0: oy, x1: ox + ow * T, y1: oy + oh * T };
+}
+function growWorld(w, box) {                         // 広がった外側に、木・石・草・危険などを新しく作る
+  const out = (x, y, m) => x < box.x0 - m || x > box.x1 + m || y < box.y0 - m || y > box.y1 + m;
+  const tmp = baseWorld('tmp');
+  genSurface(tmp);
+  for (const t of tmp.trees) {
+    if (!out(t.x, t.y, t.r + 470)) continue;
+    w.trees.push(t); w.rocks.push({ x: t.x, y: t.y, r: t.r, k: 'c' });
+    for (const pts of t.roots) for (const [cx, cy, cw] of pts) w.rocks.push({ x: cx, y: cy, r: Math.round(cw / 2), k: 'c' });
+  }
+  for (const d of tmp.deco) { if (!out(d.x, d.y, (d.r || 0) + 60)) continue; w.deco.push(d); if (d.t !== 'flower') w.rocks.push({ x: d.x, y: d.y, r: d.r, k: 'c' }); }
+  for (const o of tmp.rocks) if (!o.k && out(o.x, o.y, o.r + 40)) w.rocks.push(o);
+  for (const d of tmp.dens) if (out(d.x, d.y, 120)) w.dens.push(d);
+  for (const [i, g] of tmp.grass) if (out((i % SW + 0.5) * T, (Math.floor(i / SW) + 0.5) * T, 24)) w.grass.set(i, g);
+  const hz = baseWorld('tmp');
+  Object.assign(hz, { rocks: w.rocks, lair: w.lair, townPos: w.townPos, grass: w.grass, nextId: w.nextId });
+  genHazards(hz);
+  w.nextId = hz.nextId;
+  for (const sd of hz.sand) if (out(sd.x, sd.y, sd.r + 60)) { w.sand.push(sd); for (const q of hz.pits) if (dist(q, sd) < sd.r) w.pits.push(q); }
+  for (const q of hz.puddles) if (out(q.x, q.y, q.r + 30)) w.puddles.push(q);
+  for (const m of hz.mantisSpots) if (out(m.x, m.y, 60)) w.mantisSpots.push(m);
+  for (const r of RES) for (let k = 0; k < r.n && (w.resCount[r.z + ':' + r.item] || 0) < r.n; k++) spawnRes(w, r);
+  spawnNodes(w);
+  console.log(`world ${w.code}: 地上を ${OLD_SW}x${OLD_SH} → ${SW}x${SH} に広げました`);
+}
+
+// ---- 石の当たり判定を速くするためのマス目 ----
+const NO_ROCKS = [];
+function rockGrid(w) {
+  if (w._rg && w._rgRef === w.rocks && w._rgN === w.rocks.length) return w._rg;
+  const C = 256, cols = Math.ceil(SW * T / C) + 2, g = new Map();
+  for (const o of w.rocks) {
+    const pad = o.r + 64;
+    for (let cy = Math.floor((o.y - pad) / C); cy <= Math.floor((o.y + pad) / C); cy++) for (let cx = Math.floor((o.x - pad) / C); cx <= Math.floor((o.x + pad) / C); cx++) {
+      const k = (cy + 1) * cols + cx + 1; let a = g.get(k); if (!a) g.set(k, a = []); a.push(o);
+    }
+  }
+  w._rg = { g, C, cols }; w._rgRef = w.rocks; w._rgN = w.rocks.length;
+  return w._rg;
+}
+const rocksAt = (w, x, y) => { const R = rockGrid(w); return R.g.get((Math.floor(y / R.C) + 1) * R.cols + Math.floor(x / R.C) + 1) || NO_ROCKS; };
+
 // ================= 環境（昼夜・雨・草・資源・湧き） =================
 function sideErrand(w) {
   const q = w.quest;
@@ -1645,7 +1950,7 @@ function updateEnv(w) {
     w.isNight = false; w.time = 0; w.day++;
     for (const e of w.enemies) if (e.raider) e.retreat = true;
     for (const p of Object.values(w.players)) wake(p);
-    spawnNodes(w); spawnCubes(w); spawnMantises(w);
+    spawnNodes(w); spawnCubes(w); spawnMantises(w); spawnCritters(w); farmMorning(w);
     if (w.prints.length) { w.prints = []; io.to(w.code).emit('prints', []); }
     msg(w, `☀ ${w.day}日目の朝。モンスターが巣穴へ帰っていく${w.day === w.nextHuman ? '…今日は地面が少し揺れている気がする' : ''}`);
   }
@@ -1662,6 +1967,8 @@ function updateEnv(w) {
   w.secT -= DT;
   if (w.secT > 0) return;
   w.secT = 1;
+  farmTick(w);
+  spawnLadybugs(w);
   if (!w.isNight && w.rain <= 0 && !w.human && Math.random() < 1 / 100) { w.rain = 30; msg(w, '☔ 雨が降ってきた。草がぐんぐん育つ！'); }
   const chance = w.rain > 0 ? 1 / 5 : 1 / 150;               // 草の成長
   for (const [i, g] of w.grass) if (g < 3 && Math.random() < chance) { w.grass.set(i, g + 1); w.grassQ.push([i, g + 1]); }
@@ -1674,7 +1981,7 @@ function updateEnv(w) {
     const raiders = w.enemies.filter(e => e.raider && !e.retreat).length;
     if (raiders < cap && Math.random() < 0.6) spawnEnemy(w, Math.random() < Math.min(0.5, 0.15 + w.day * 0.04) ? 'beetle' : 'spider', w.dens[randi(0, w.dens.length - 1)], true);
   }
-  if (w.enemies.filter(e => !e.raider && e.home !== w.lair && e.type !== 'mantis').length < 8 && Math.random() < 0.2) {
+  if (w.enemies.filter(e => !e.raider && e.home !== w.lair && e.type !== 'mantis' && e.type !== 'ladybug').length < 18 && Math.random() < 0.25) {
     const far = w.dens.filter(d => zoneOf(d.x, d.y) === 3), list = far.length ? far : w.dens;
     spawnEnemy(w, Math.random() < 0.4 ? 'beetle' : 'spider', list[randi(0, list.length - 1)], false);
   }
@@ -1690,7 +1997,9 @@ function broadcast(w) {
       p.dig ? p.dig.idx : -1, p.dig ? +(p.dig.prog / p.dig.hard).toFixed(2) : 0, jawOf(p), armorOf(p),
       p.sleep ? 1 : 0, p.slowT > 0 ? 1 : 0, p.grab || 0,
       p.trap ? { pit: 1, mantis: 2, bird: 3 }[p.trap.kind] : 0, p.trap ? +(p.trap.n / p.trap.need).toFixed(2) : 0, Math.round(p.heat), p.immuneT > 0 ? 1 : 0,
+      [Math.ceil(p.buffs.spd || 0), Math.ceil(p.buffs.see || 0), Math.ceil(p.buffs.tough || 0)], p.ride || 0,
     ]),
+    cr: w.critters.map(c => [c.id, CR_KIND[c.k], LC(c.layer), Math.round(c.x), Math.round(c.y), +c.a.toFixed(2), (c.fol ? 1 : 0) | (c.owner ? 2 : 0) | (c.rider ? 4 : 0) | (c.roll > 0 ? 8 : 0), c.tame, c.rider || 0]),
     e: w.enemies.map(e => [e.id, EN[e.type].idx, LC(e.layer), Math.round(e.x), Math.round(e.y), +e.a.toFixed(2), Math.round(e.hp / e.maxHp * 100), e.hitT > 0 ? 1 : 0, e.type !== 'mantis' || e.holding || e.revealT > 0 ? 1 : 0]),
     b: w.bird ? [['circle', 'dive', 'carry', 'leave'].indexOf(w.bird.st), Math.round(w.bird.x), Math.round(w.bird.y), w.bird.tid] : null,
     ar: w.army ? [w.army.axis === 'x' ? 0 : 1, w.army.dir, Math.round(w.army.pos), Math.ceil(w.army.warn)] : null,
@@ -1715,6 +2024,7 @@ function tickWorld(w) {
   w.tickN++;
   updatePlayers(w);
   updateCubes(w);
+  updateCritters(w);
   updateEnemies(w);
   updateQueen(w);
   updateCracks(w);
@@ -1727,12 +2037,13 @@ function tickWorld(w) {
 setInterval(() => { for (const code in rooms) { try { tickWorld(rooms[code]); } catch (e) { console.error('tick error', code, e); } } }, 1000 / TICK);
 
 function fullSync(w, p) {
-  const ob = l => [...w.objs[l]].map(([i, o]) => [i, o.t, Math.round(o.hp), o.a || 0]);
+  const ob = l => [...w.objs[l]].map(([i, o]) => { const v = objView(o); return [i, v.t, v.hp, v.a, v.d || 0]; });
   return {
     code: w.code, me: p.id, worldName: w.name,
     defs: {
       T, SW, SH, UW, UH, TW, TH, NEST, UENT, TEXIT, PLAYER_SPEED, PR, REACH, ITEMS, OBJ, RECIPES, JAW, DAY_LEN, NIGHT_LEN,
       INV_SIZE, HOTBAR, CHEST_SIZE, SUPPORT_RANGE, CUBE_R, DRAG: [42, 34, 130], SHOP_BUY, SELL, GACHA_COST, BET_AMOUNTS, SAFE_R, ACC_INFO,
+      ZONE_R, RIDE_MULT, BUFF_NAME, HUT_CAP, HUT_FOOD, BED_LEAF, GACHA,
     },
     rocks: w.rocks, dens: w.dens, trees: w.trees, deco: w.deco, grass: [...w.grass],
     under: Buffer.from(w.under).toString('base64'), town: Buffer.from(TOWN_GRID).toString('base64'),
@@ -1774,6 +2085,8 @@ function npcPayload(w, kind) {
       '🍬 角砂糖ブロックは、巣に運ぶと「かけら」に、商店街の入口に運ぶとミツ玉になるよ',
       '⛏ 地下で広い部屋を掘るときは柱を立てないと、部屋ごと崩れるよ',
       '🌙 夜はモンスターが巣のまわりをうろつく。巣の中までは入ってこない',
+      '🐛 草むらのアブラムシは巣の小屋で飼える。連れて歩くとテントウムシが寄ってくるから気をつけて',
+      '🐾 野生のダンゴムシは葉っぱが大好き。仲良くなると背中に乗せてくれるらしい',
     ],
   };
   return { kind };
@@ -1972,7 +2285,8 @@ io.on('connection', socket => {
     if (!isFinite(x) || !isFinite(y)) return;
     const now = Date.now(), el = Math.min(0.5, (now - p.lastPos) / 1000);
     p.lastPos = now;
-    if (Math.hypot(x - p.x, y - p.y) > PLAYER_SPEED * Math.max(el, 0.05) * 1.8 + 12) { teleport(p, p.layer, p.x, p.y); return; }
+    const vmul = (p.ride ? RIDE_MULT : 1) * (p.buffs.spd > 0 ? 1.25 : 1);
+    if (Math.hypot(x - p.x, y - p.y) > PLAYER_SPEED * vmul * Math.max(el, 0.05) * 1.8 + 12) { teleport(p, p.layer, p.x, p.y); return; }
     const tmp = { x, y };
     collide(w, p.layer, tmp, PR - 1);
     if (Math.hypot(tmp.x - x, tmp.y - y) > 6) { teleport(p, p.layer, tmp.x, tmp.y); return; }
@@ -1990,6 +2304,7 @@ io.on('connection', socket => {
     const held = p.inv[p.sel];
     if (held && ITEMS[held.id].tool) { useTool(w, p, held); return; }
     if (p.trap) return;
+    if (p.ride) { dismount(w, p); msgTo(p, 'ダンゴムシから降りた'); return; }
     if (p.grab) { releaseGrab(w, p); return; }                    // 角砂糖を離す
     if (p.layer === 's') {                                        // 角砂糖をつかむ
       const cube = w.cubes.find(cb => Math.hypot(cb.x - x, cb.y - y) < CUBE_R + 26 && dist(cb, p) < CUBE_R + PR + 50);
@@ -1999,10 +2314,14 @@ io.on('connection', socket => {
         return;
       }
     }
+    const cr = w.critters.find(c => c.layer === p.layer && !c.rider && Math.hypot(c.x - x, c.y - y) < 30 && dist(c, p) < REACH + 24);
+    if (cr) { critterUse(w, p, cr); return; }                     // アブラムシ・ダンゴムシ
     if (Math.hypot(x - p.x, y - p.y) > REACH + 8) return;
     const l = p.layer, tx = Math.floor(x / T), ty = Math.floor(y / T);
     const idx = ty * LW(l) + tx, o = w.objs[l].get(idx);
     if (o) {
+      if (o.t === 'stove') { socket.emit('openCraft', { tab: 'cook' }); return; }
+      if (o.t === 'aphidHut' || o.t === 'mushBed') { farmUse(w, p, l, idx, o); return; }
       if (o.t === 'chest') { p.openChest = { l, idx }; socket.emit('chest', { l, i: idx, items: o.items }); return; }
       if (o.t === 'bench') { socket.emit('openCraft'); return; }
       if (NPC_KIND[o.t]) {
@@ -2016,6 +2335,7 @@ io.on('connection', socket => {
         if (!w.isNight) { msgTo(p, '🛏 ここを復活地点にした（夜になったら眠れる）'); return; }
         if (w.enemies.some(e => e.layer === l && Math.hypot(e.x - p.x, e.y - p.y) < 200)) { msgTo(p, '近くに敵がいて眠れない！'); return; }
         teleport(p, l, (tx + 0.5) * T, (ty + 0.5) * T);
+        if (p.ride) dismount(w, p);
         p.sleep = true; p.lmb = false; p.dig = null;
         msg(w, `💤 ${p.name}が眠った（全員が眠ると夜が早く過ぎる）`);
         return;
@@ -2032,6 +2352,7 @@ io.on('connection', socket => {
     if (!s) return;
     const def = ITEMS[s.id];
     if (def.food) { eat(p); return; }
+    if (def.place && OBJ[def.place].under && !isUnder(l)) { msgTo(p, `${def.n}は巣の中（地下）に置こう`); return; }
     if (def.place && canPlace(w, l, tx, ty, def.place)) {
       const no = { t: def.place, hp: OBJ[def.place].hp };
       if (def.place === 'chest') no.items = new Array(CHEST_SIZE).fill(null);
@@ -2073,9 +2394,12 @@ io.on('connection', socket => {
   });
   function eat(p) {
     const s = p.inv[p.sel];
-    if (!s || !ITEMS[s.id].food || (p.hunger >= 99.5 && !ITEMS[s.id].cool)) return;
-    p.hunger = Math.min(100, p.hunger + ITEMS[s.id].food);
-    if (ITEMS[s.id].cool) { p.heat = Math.max(0, p.heat - ITEMS[s.id].cool); msgTo(p, '💧 水を飲んで体が冷えた'); }
+    const def = s && ITEMS[s.id];
+    if (!def || !def.food || (p.hunger >= 99.5 && !def.cool && !def.heal && !def.buff)) return;
+    p.hunger = Math.min(100, p.hunger + def.food);
+    if (def.cool) { p.heat = Math.max(0, p.heat - def.cool); msgTo(p, s.id === 'water' ? '💧 水を飲んで体が冷えた' : '🍵 体がすっと冷えた'); }
+    if (def.heal) p.hp = Math.min(100, p.hp + def.heal);
+    if (def.buff) { p.buffs[def.buff] = def.bt; msgTo(p, `✨ ${BUFF_NAME[def.buff]}（${def.bt}秒）`); }
     s.n--; if (!s.n) p.inv[p.sel] = null;
     emitInv(p);
   }
@@ -2086,6 +2410,7 @@ io.on('connection', socket => {
     const { w, p } = c, r = RECIPES[ri];
     if (!r) return;
     if (r.bench && !nearObj(w, p, ['bench'])) { msgTo(p, '作業台の近くでないと作れない'); return; }
+    if (r.cook && !nearObj(w, p, ['stove'])) { msgTo(p, '調理台の近くでないと料理できない'); return; }
     if (!hasAll(p.inv, r.cost)) return;
     for (const id in r.cost) removeItem(p.inv, id, r.cost[id]);
     let slot = equipSlotOf(r.out);
@@ -2166,7 +2491,13 @@ io.on('connection', socket => {
   socket.on('enter', () => {
     const c = ctx(); if (!c || c.p.dead || c.p.sleep || c.p.trap) return;
     const { w, p } = c;
+    const before = p.layer, fol = w.critters.filter(cr => cr.fol === p.id && cr.layer === p.layer && dist(cr, p) < 260);
+    doEnter(w, p);
+    if (p.layer !== before) fol.forEach((cr, k) => { cr.layer = p.layer; cr.x = p.x + (k - 1) * 16; cr.y = p.y + 18; collide(w, p.layer, cr, 7); });
+  });
+  function doEnter(w, p) {
     if (p.grab) releaseGrab(w, p);
+    if (p.ride && (dist(p, NEST) < NEST.r + 30 || dist(p, w.townPos) < 60)) { dismount(w, p); msgTo(p, 'ダンゴムシは入口で待っている'); }
     if (p.layer === 's' && dist(p, NEST) < NEST.r + 30) teleport(p, 'u', UENT_X, UENT_Y);
     else if (p.layer === 's' && dist(p, w.townPos) < 60) { teleport(p, 't', TSPAWN.x, TSPAWN.y); msgTo(p, '🏮 アリ商店街へようこそ！'); }
     else if (isUnder(p.layer)) {                                  // 出入口・階段（いちばん近いもの）
@@ -2186,7 +2517,7 @@ io.on('connection', socket => {
       msgTo(p, `地下${FLOOR_NO[to]}階${to === 'u' ? '（巣）' : ''}`);
     }
     else if (p.layer === 't' && Math.hypot(p.x - (TEXIT.tx + 0.5) * T, p.y - (TEXIT.ty + 0.5) * T) < T * 1.6) teleport(p, 's', w.townPos.x, w.townPos.y + 56);
-  });
+  }
 
   // ---------- お店 ----------
   socket.on('shopBuy', i => {
@@ -2259,9 +2590,13 @@ io.on('connection', socket => {
     if (d.human) { w.nextHuman = w.day; w.humanAt = 0; w.isNight = false; if (w.time > DAY_LEN - 60) w.time = 10; }
     if (d.cube) w.cubes.push({ id: w.nextId++, x: d.cube.x, y: d.cube.y, grab: [] });
     if (d.bird) { w.isNight = false; w.rain = 0; if (w.time < 20 || w.time > DAY_LEN - 20) w.time = 60; w.birdCd = 0; w.bird = null; }
-    if (d.army) { startArmy(w); w.army.warn = 2; if (d.army.pos !== undefined) { w.army.axis = 'x'; w.army.dir = 1; w.army.pos = d.army.pos; } }
+    if (d.army) { startArmy(w); w.army.warn = 2; if (d.army.pos !== undefined) { w.army.axis = 'x'; w.army.dir = 1; w.army.pos = d.army.pos; w.army.end = d.army.pos + 6000; } }
     if (d.rain) { w.rain = 30; w.wet = 1; }
     if (d.noon) { w.isNight = false; w.rain = 0; w.time = DAY_LEN / 2; }
+    if (d.critter) { const c = newCritter(w, d.critter, p.x + 40, p.y, p.layer); if (d.tame) { c.owner = p.name; c.tame = 3; } }
+    if (d.ladybug) { const e = spawnEnemy(w, 'ladybug', { x: p.x + d.ladybug, y: p.y }, false); Object.assign(e, { x: p.x + d.ladybug, y: p.y, wt: 0 }); }
+    if (d.morning) farmMorning(w);
+    if (d.grow) for (let k = 0; k < d.grow; k++) farmTick(w);
     if (d.clear) { const { l, x0, y0, x1, y1 } = d.clear, g = gridOf(w, l); for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) { const i = ty * UW + tx; if (g[i] !== U.STAIR_UP && g[i] !== U.STAIR_DN) { g[i] = U.OPEN; w.tileQ.push([LC(l), i, U.OPEN]); } } recomputeSupport(w, l); }
   });
 
@@ -2284,6 +2619,8 @@ function leaveWorld(socket, silent) {
   if (!w || !w.players[socket.id]) return;
   const p = w.players[socket.id];
   if (p.grab) releaseGrab(w, p);
+  if (p.ride) dismount(w, p);
+  for (const cr of w.critters) if (cr.fol === p.id) { cr.fol = null; cr.hx = cr.x; cr.hy = cr.y; }
   if (p.trap) p.trap = null;
   w.saved[p.name] = playerSave(p);
   delete w.players[socket.id];
