@@ -91,8 +91,12 @@
   .rc button { padding: 6px 14px; border: none; border-radius: 4px; background: #d79b3b; color: #1d140b; font-weight: bold; cursor: pointer; font-family: inherit; }
   .rc button:disabled { background: #4b3a24; color: #7d6a4c; cursor: default; }
   .phint { margin-top: 10px; font-size: 12px; color: #8f7d60; }
-  #pinfo { margin-top: 8px; min-height: 64px; background: #1c140b; border: 1px solid #3e2f1c; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: #c8b796; }
+  #pinfo { margin-top: 8px; height: 104px; overflow-y: auto; width: 0; min-width: 100%; box-sizing: border-box; background: #1c140b; border: 1px solid #3e2f1c; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: #c8b796; }
   #pinfo:empty::before { content: 'アイテムにカーソルを合わせる（タップする）と説明が出る'; color: #6b5a40; }
+  .cdiv { position: relative; height: 0; border-top: 4px solid #8a6a3a; margin: 16px 0 14px; }
+  .cdiv span { position: absolute; left: 50%; top: -11px; transform: translateX(-50%); background: #18110a; padding: 0 10px; font-size: 11px; color: #c8b796; white-space: nowrap; }
+  .clab { font-size: 11px; color: #8f7d60; margin: 0 0 4px; }
+  .hotsep { border-top: 1px dashed #4b3a24; margin: 7px 0; }
   .iinfo { display: flex; gap: 10px; align-items: flex-start; }
   .iinfo img { width: 40px; height: 40px; flex: none; }
   .iinfo b { color: #f0d9a8; font-size: 14px; }
@@ -2362,7 +2366,11 @@ function renderPanel() {
   } else if (panel === 'chest' && chest) {
     let g = '<div class="grid">';
     for (let i = 0; i < D.CHEST_SIZE; i++) g += slotHTML(chest.items[i], `data-k="chest" data-i="${i}"`);
-    h = g + '</div>' + invSections('cinv');
+    let hot = '', bag = '';
+    for (let i = 0; i < D.HOTBAR; i++) hot += slotHTML(inv[i], `data-k="cinv" data-i="${i}"`, i === sel ? 'sel' : '', i + 1);
+    for (let i = D.HOTBAR; i < D.INV_SIZE; i++) bag += slotHTML(inv[i], `data-k="cinv" data-i="${i}"`);
+    h = '<div class="clab">📦 チェストの中</div>' + g + '</div><div class="cdiv"><span>▲ チェスト　　▼ 自分の持ち物</span></div>'
+      + `<div class="grid bagrow">${bag}</div><div class="hotsep"></div><div class="grid hotrow">${hot}</div>`;
     hint = 'クリックでチェスト ⇄ 持ち物 に移動（仲間と共有）';
   } else if (panel === 'journal') {
     h = `<div class="recipes">${journalHTML()}</div>`;
