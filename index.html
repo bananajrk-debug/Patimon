@@ -212,14 +212,14 @@ function resize() { VW = cv.width = dark.width = innerWidth; VH = cv.height = da
 addEventListener('resize', resize); resize();
 
 // ================= 状態 =================
-const LAYERS = ['s', 'u', 't', 'u2', 'u3'];
+const LAYERS = ['s', 'u', 't', 'u2', 'u3', 'k1', 'k2', 'k3'];
 const UL = ['u', 'u2', 'u3'], isUnder = l => UL.includes(l), FLOOR = { u: 1, u2: 2, u3: 3 };
 const grids = {};
 let D = null, MEID = null, CODE = '', WORLD_NAME = '';
 const me = { l: 'u', x: 0, y: 0, a: 0, s: 1, phase: 0 };
 let inv = [], sel = 0, under = null, town = null, rocks = [], dens = [], trees = [], deco = [];
 let touchMode = false, joy = null, wt = null, wakeT = 0;
-const objs = { s: new Map(), u: new Map(), t: new Map(), u2: new Map(), u3: new Map() }, items = new Map();
+const objs = { s: new Map(), u: new Map(), t: new Map(), u2: new Map(), u3: new Map(), k1: new Map(), k2: new Map(), k3: new Map() }, items = new Map();
 let grass = new Map(), st = null, cracks = new Map();   // キー: "階:マス番号"
 let sand = [], pits = [], puddles = [], armyBanner = 0, ddTouch = false, explored = null, expKey = '', expT = 0;
 const RP = {}, RE = {}, RC = {}, RCR = {};
@@ -353,6 +353,367 @@ socket.on('lobby', d => {
     || '<div class="empty">ユーザーネームを入れるとフレンドを追加できます。お互いに追加し合うと、相手のワールドに参加できます</div>';
 });
 
+// ================= v0.9：自然・交易・荷車 =================
+const KL = ['k1', 'k2', 'k3'], isKing = l => KL.includes(l), isTownL = l => l === 't' || isKing(l);
+let river = null, ponds = [], logs = [], meadows = [], hills = [], treasures = [], ktown = null, wm = null;
+let trade = null, deliveredFx = null, envoy = 0, eHold = null, actHold = null, frontT = null, lastDryX = 0, lastDryY = 0;
+const RCA = {};
+const KCOL = { k1: ['#5fae3a', '#3c7a22', '#4a3a1e', '#2e2412'], k2: ['#7a7a8e', '#3e3e4c', '#38343a', '#222026'], k3: ['#e8b84a', '#a8782a', '#5a4630', '#3a2c1c'] };
+function segDistC(px, py, a, b) {
+  const vx = b.x - a.x, vy = b.y - a.y, L = vx * vx + vy * vy || 1, t = clamp(((px - a.x) * vx + (py - a.y) * vy) / L, 0, 1);
+  return Math.hypot(px - a.x - vx * t, py - a.y - vy * t);
+}
+function waterMapC() {
+  if (wm || !river) return wm;
+  const SW = D.SW, SH = D.SH, T = D.T, d = new Float32Array(SW * SH).fill(1e9), seg = new Int16Array(SW * SH).fill(-1), P = river.pts, pad = river.hw * 1.6 + T;
+  for (let i = 0; i < P.length - 1; i++) {
+    const a = P[i], b = P[i + 1];
+    const tx0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - pad) / T)), tx1 = Math.min(SW - 1, Math.floor((Math.max(a.x, b.x) + pad) / T));
+    const ty0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - pad) / T)), ty1 = Math.min(SH - 1, Math.floor((Math.max(a.y, b.y) + pad) / T));
+    for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) { const k = ty * SW + tx, dd = segDistC((tx + .5) * T, (ty + .5) * T, a, b); if (dd < d[k]) { d[k] = dd; seg[k] = i; } }
+  }
+  return (wm = { d, seg });
+}
+function inWaterC(x, y) {                       // サーバーと同じ計算
+  if (!river) return null;
+  const T = D.T, tx = Math.floor(x / T), ty = Math.floor(y / T);
+  if (tx < 0 || ty < 0 || tx >= D.SW || ty >= D.SH) return null;
+  const k = ty * D.SW + tx, o = objs.s.get(k);
+  if (o && o.t === 'bridge') return null;
+  const m = waterMapC(), wet = wetC();
+  if (m.d[k] < river.hw * (1 + .35 * wet)) { const P = river.pts, i = m.seg[k], a = P[i], b = P[i + 1], L = Math.hypot(b.x - a.x, b.y - a.y) || 1, sp = 70 + 50 * wet; return { kind: 'river', fx: (b.x - a.x) / L * sp, fy: (b.y - a.y) / L * sp }; }
+  for (const q of ponds) if (Math.hypot(q.x - x, q.y - y) < q.r * (1 + .15 * wet)) return { kind: 'pond', fx: 0, fy: 0 };
+  return null;
+}
+const inLogC = (x, y) => logs.some(g => segDistC(x, y, { x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }) < g.r);
+const floorMulC = (x, y) => { if (me.l !== 's') return 1; const o = objs.s.get(Math.floor(y / D.T) * D.SW + Math.floor(x / D.T)); return o && D.OBJ[o.t].floor ? D.OBJ[o.t].floor : 1; };
+const ridingC = () => { const ms = myState(); return !!(ms && (ms[24] || ms[30])); };
+const gateNear = () => me.l === 's' && D.KINGDOMS ? KL.find(k => Math.hypot(me.x - D.KINGDOMS[k].gate.x, me.y - D.KINGDOMS[k].gate.y) < 120) : null;
+const dayLen = () => D.DAY_LEN + D.NIGHT_LEN;
+const nowAbs = () => st ? st.c[0] + (st.c[2] ? D.DAY_LEN + st.c[1] : st.c[1]) / dayLen() : 1;
+function leftStr(t) { if (t <= 0) return '期限切れ'; const d = Math.floor(t), h = Math.floor((t - d) * 24); return d ? `あと${d}日${h}時間` : `あと${h}時間`; }
+// ---- 目の前の対象（Eで触れるもの） ----
+const INFRONT = 1.05;                            // 正面からの角度（約60°）
+function inCone(x, y, maxD) {
+  const d = Math.hypot(x - me.x, y - me.y);
+  if (d > maxD) return -1;
+  if (d < 16) return d;
+  const ad = angDiff(Math.atan2(y - me.y, x - me.x), me.a);
+  return ad <= INFRONT ? d + ad * 30 : -1;
+}
+function frontTarget() {
+  if (!D || !st) return null;
+  const T = D.T, W = LW(me.l), cx0 = Math.floor(me.x / T), cy0 = Math.floor(me.y / T), riding = ridingC();
+  let best = null, bs = 1e9;
+  const take = (sc, t) => { if (sc >= 0 && sc < bs) { bs = sc; best = t; } };
+  for (let ty = cy0 - 3; ty <= cy0 + 3; ty++) for (let tx = cx0 - 3; tx <= cx0 + 3; tx++) {
+    const o = objs[me.l].get(ty * W + tx);
+    if (!o || !INTERACT[o.t]) continue;
+    const x = (tx + .5) * T, y = (ty + .5) * T;
+    take(inCone(x, y, D.REACH), { kind: 'obj', o, x, y, tx, ty, r: 18 });
+  }
+  if (me.l === 's') {
+    if (!riding) for (const id in RC) { const c = RC[id]; take(inCone(c.x, c.y, D.CUBE_R + D.PR + 46), { kind: 'cube', x: c.x, y: c.y, r: D.CUBE_R + 6 }); }
+    for (const id in RCA) { const c = RCA[id]; take(inCone(c.x, c.y, D.REACH + 26), { kind: 'cart', c, x: c.x, y: c.y, r: 22 }); }
+    if (envoy) take(inCone(envoy[1], envoy[2], D.REACH + 30), { kind: 'envoy', x: envoy[1], y: envoy[2], r: 18 });
+  }
+  for (const id in RCR) {
+    const c = RCR[id];
+    if (LAYERS[c.d[2]] !== me.l) continue;
+    if (c.d[6] & 4) { if (!riding && c.d[6] & 16 && !c.d[9] && c.d[8] !== MEID) take(inCone(c.x, c.y, D.REACH + 10), { kind: 'critter', c, x: c.x, y: c.y, r: 16, seat: 1 }); continue; }
+    if (riding && c.d[1] === 1) continue;
+    take(inCone(c.x, c.y, D.REACH + 10), { kind: 'critter', c, x: c.x, y: c.y, r: c.d[1] === 1 ? 16 : 10 });
+  }
+  return best;
+}
+function drawFrontTarget() {
+  const t = frontT; if (!t || panel) return;
+  const k = .55 + Math.sin(TT * 6) * .3;
+  ctx.strokeStyle = `rgba(255,236,150,${k})`; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.lineDashOffset = -TT * 20;
+  if (t.kind === 'obj') { ctx.beginPath(); ctx.roundRect(t.tx * D.T - 2, t.ty * D.T - 2, D.T + 4, D.T + 4, 6); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(t.x, t.y, t.r + 4, 0, 7); ctx.stroke(); }
+  ctx.setLineDash([]); ctx.lineDashOffset = 0;
+}
+// ---- 水・丸太・花畑・岩山・国の門 ----
+function drawWater(tx0, ty0, tx1, ty1) {
+  const T = D.T, y0 = ty0 * T - 200, y1 = (ty1 + 1) * T + 200, x0 = tx0 * T - 200, x1 = (tx1 + 1) * T + 200, wet = wetC();
+  for (const m of meadows) if (m.x + m.r > x0 && m.x - m.r < x1 && m.y + m.r > y0 && m.y - m.r < y1) {
+    const g = ctx.createRadialGradient(m.x, m.y, m.r * .3, m.x, m.y, m.r * 1.15); g.addColorStop(0, 'rgba(150,200,90,.28)'); g.addColorStop(1, 'rgba(150,200,90,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(m.x, m.y, m.r * 1.15, 0, 7); ctx.fill();
+  }
+  for (const h of hills) if (h.x + h.r > x0 && h.x - h.r < x1 && h.y + h.r > y0 && h.y - h.r < y1) {
+    const g = ctx.createRadialGradient(h.x, h.y, h.r * .2, h.x, h.y, h.r * 1.2); g.addColorStop(0, 'rgba(140,130,110,.35)'); g.addColorStop(1, 'rgba(140,130,110,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h.x, h.y, h.r * 1.2, 0, 7); ctx.fill();
+  }
+  for (const q of ponds) {
+    const r = q.r * (1 + .15 * wet);
+    if (q.x + r + 30 < x0 || q.x - r - 30 > x1 || q.y + r + 30 < y0 || q.y - r - 30 > y1) continue;
+    circ(ctx, q.x, q.y, r + 14, '#4e3a22'); circ(ctx, q.x, q.y, r + 4, '#3d5f78');
+    const g = ctx.createRadialGradient(q.x - r * .3, q.y - r * .3, r * .1, q.x, q.y, r); g.addColorStop(0, '#5f93b8'); g.addColorStop(1, '#2f5a80');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, 7); ctx.fill();
+    for (let k = 0; k < 3; k++) { const t = (TT * .25 + k / 3) % 1; ctx.strokeStyle = `rgba(220,240,255,${.25 * (1 - t)})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(q.x + Math.cos(k * 2) * r * .4, q.y + Math.sin(k * 2) * r * .4, 6 + t * 30, 0, 7); ctx.stroke(); }
+    for (let k = 0; k < 4; k++) { const a = hash(q.x, k) * 7, d = r * (.35 + hash(k, q.y) * .45); ell(ctx, q.x + Math.cos(a) * d, q.y + Math.sin(a) * d, 14, 11, a, '#4f8a35'); ell(ctx, q.x + Math.cos(a) * d + 3, q.y + Math.sin(a) * d, 3, 9, a, '#3a6a25'); }
+  }
+  if (!river) return;
+  const P = river.pts, hw = river.hw * (1 + .35 * wet);
+  const runs = []; let cur = null;
+  for (const p of P) { if (p.y < y0 - hw || p.y > y1 + hw || p.x < x0 - 400 || p.x > x1 + 400) { cur = null; continue; } if (!cur) runs.push(cur = []); cur.push(p); }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const stroke = (w, col, dash, off) => {
+    ctx.strokeStyle = col; ctx.lineWidth = w; if (dash) { ctx.setLineDash(dash); ctx.lineDashOffset = off; }
+    for (const r of runs) { ctx.beginPath(); r.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke(); }
+    if (dash) { ctx.setLineDash([]); ctx.lineDashOffset = 0; }
+  };
+  stroke(hw * 2 + 26, '#4e3a22'); stroke(hw * 2 + 8, '#36597a'); stroke(hw * 2, '#2f5f8a'); stroke(hw * 1.2, 'rgba(70,130,180,.35)'); stroke(hw * .5, 'rgba(70,130,180,.25)');
+  const sp = 70 + 50 * wet;
+  const off = (r, d) => r.map((p, i) => { const a = r[Math.max(0, i - 1)], b = r[Math.min(r.length - 1, i + 1)], L = Math.hypot(b.x - a.x, b.y - a.y) || 1; return { x: p.x - (b.y - a.y) / L * d, y: p.y + (b.x - a.x) / L * d }; });
+  ctx.lineCap = 'butt';
+  for (const [d, w, col, dash, k] of [[-.62, 1.4, 'rgba(225,242,255,.28)', [6, 38], 1.1], [-.25, 1.8, 'rgba(225,242,255,.35)', [12, 54], .95], [.18, 1.2, 'rgba(225,242,255,.3)', [5, 29], 1.2], [.55, 1.6, 'rgba(225,242,255,.25)', [9, 47], 1]]) {
+    ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.lineDashOffset = -TT * sp * k;
+    for (const r of runs) { const q = off(r, d * hw); ctx.beginPath(); q.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke(); }
+  }
+  ctx.setLineDash([]); ctx.lineDashOffset = 0; ctx.lineCap = 'round';
+  for (const sx of [-1, 1]) { ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 3; for (const r of runs) { const q = off(r, sx * (hw - 2)); ctx.beginPath(); q.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke(); } }
+}
+function drawLogs(vis) {
+  const mine = inLogC(me.x, me.y);
+  for (const g of logs) {
+    const mx = (g.x1 + g.x2) / 2, my = (g.y1 + g.y2) / 2, L = Math.hypot(g.x2 - g.x1, g.y2 - g.y1);
+    if (!vis(mx, my, L)) continue;
+    const near = mine && segDistC(me.x, me.y, { x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 }) < g.r;
+    ctx.save(); ctx.translate(mx, my); ctx.rotate(Math.atan2(g.y2 - g.y1, g.x2 - g.x1));
+    ctx.globalAlpha = near ? .38 : .94;
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.roundRect(-L / 2 - g.r + 8, -g.r + 10, L + g.r * 2, g.r * 2, g.r); ctx.fill();
+    const gr = ctx.createLinearGradient(0, -g.r, 0, g.r); gr.addColorStop(0, '#8a5c32'); gr.addColorStop(.45, '#6b4524'); gr.addColorStop(1, '#3e2612');
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.roundRect(-L / 2 - g.r, -g.r, L + g.r * 2, g.r * 2, g.r * .6); ctx.fill();
+    for (let k = 0; k < L / 16; k++) ln(ctx, [[-L / 2 + k * 16, -g.r + 4 + hash(k, L) * 6], [-L / 2 + k * 16 + 10, -g.r + 16 + hash(L, k) * 10]], 'rgba(30,18,6,.55)', 2);
+    for (let k = 0; k < 3; k++) ell(ctx, -L / 2 + hash(k, 3) * L, (hash(3, k) - .5) * g.r, 10, 6, k, 'rgba(90,140,50,.5)');
+    for (const sx of [-1, 1]) { ell(ctx, sx * (L / 2 + g.r * .55), 0, g.r * .45, g.r * .95, 0, '#2a1a0a'); ctx.strokeStyle = '#a87a48'; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(sx * (L / 2 + g.r * .55), 0, g.r * .45, g.r * .95, 0, 0, 7); ctx.stroke(); }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+}
+function drawGates(vis) {
+  if (!D.KINGDOMS) return;
+  for (const k of KL) {
+    const K = D.KINGDOMS[k], g = K.gate;
+    if (!vis(g.x, g.y, 140)) continue;
+    const col = KCOL[k], vert = k === 'k3';
+    ctx.save(); ctx.translate(g.x, g.y); if (vert) ctx.rotate(Math.PI / 2);
+    ell(ctx, 0, 0, 70, 90, 0, 'rgba(0,0,0,.3)');
+    ell(ctx, 0, 0, 34, 52, 0, '#120a04');
+    for (const s of [-1, 1]) { ctx.fillStyle = col[2]; ctx.beginPath(); ctx.roundRect(-16, s * 52 - 12, 32, 24, 6); ctx.fill(); ctx.fillStyle = col[0]; ctx.fillRect(-10, s * 52 - 6, 20, 12); }
+    ctx.fillStyle = col[1]; ctx.fillRect(18, -40, 4, 80);
+    const wv = Math.sin(TT * 3) * 3;
+    ctx.fillStyle = col[0]; ctx.beginPath(); ctx.moveTo(22, -40); ctx.quadraticCurveTo(46, -34 + wv, 60, -30); ctx.lineTo(22, -18); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    nameTag(`🚩 ${K.n}（F で入る）`, g.x + (k === 'k1' ? 70 : k === 'k2' ? -70 : 0), g.y + (vert ? 72 : -64), '#ffe9a8');
+  }
+}
+function drawCarts(vis) {
+  for (const id in RCA) {
+    const c = RCA[id], d = c.d;
+    if (!vis(c.x, c.y, 40)) continue;
+    for (const pid in RP) { const p = RP[pid]; if (p.d[28] == id && LAYERS[p.d[3]] === 's') ln(ctx, [[p.x, p.y], [c.x, c.y]], 'rgba(230,220,190,.7)', 1.5); }
+    const ms = myState(); if (ms && ms[28] == id) ln(ctx, [[me.x, me.y], [c.x, c.y]], 'rgba(230,220,190,.7)', 1.5);
+    if (d[4] & 1) { let bp = null, bd = 90; for (const rid in RCR) { const r = RCR[rid]; if (r.d[1] === 1 && r.d[6] & 4) { const dd = Math.hypot(r.x - c.x, r.y - c.y); if (dd < bd) { bd = dd; bp = r; } } } if (bp) ln(ctx, [[bp.x, bp.y], [c.x, c.y]], '#c8b080', 2.5); }
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.a);
+    ell(ctx, 2, 5, 22, 15, 0, 'rgba(0,0,0,.35)');
+    for (const s of [-1, 1]) for (const fx of [-9, 9]) { ctx.save(); ctx.translate(fx, s * 14); ctx.rotate((d[4] & 4 ? TT * 8 : 0)); ell(ctx, 0, 0, 6, 3.2, 0, d[4] & 2 ? '#8a8a94' : '#5f8a35'); ln(ctx, [[-5, 0], [5, 0]], d[4] & 2 ? '#3a3a42' : '#2f5a1f', 1); ctx.restore(); }
+    ctx.fillStyle = '#7a5226'; ctx.beginPath(); ctx.roundRect(-16, -12, 32, 24, 4); ctx.fill();
+    ctx.fillStyle = '#946535'; ctx.beginPath(); ctx.roundRect(-14, -10, 28, 20, 3); ctx.fill();
+    ln(ctx, [[16, 0], [26, 0]], '#5a3a1a', 2.5);
+    const n = d[5];
+    for (let k = 0; k < Math.min(6, n); k++) circ(ctx, -9 + (k % 3) * 9, -4 + Math.floor(k / 3) * 8, 4.5, ['#d9b77a', '#4f9a33', '#8a867c', '#e2b45c', '#d6303a', '#7a5530'][k]);
+    ctx.restore();
+    if (n) nameTag(`🛒 ${n}種類`, c.x, c.y - 22, '#f0d9a8');
+  }
+}
+function drawEnvoy() {
+  if (!envoy || me.l !== 's') return;
+  const k = KL[envoy[0]], x = envoy[1], y = envoy[2], col = KCOL[k][0];
+  drawAnt(x, y, Math.PI / 2, col, .8, 0, null, 0);
+  if (k === 'k3') { ctx.globalAlpha = .5; ell(ctx, x - 10, y - 4, 12, 5, -.5, '#eef'); ell(ctx, x + 10, y - 4, 12, 5, .5, '#eef'); ctx.globalAlpha = 1; }
+  ln(ctx, [[x + 12, y + 10], [x + 12, y - 22]], '#7a5530', 2);
+  ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x + 12, y - 22); ctx.lineTo(x + 28, y - 17); ctx.lineTo(x + 12, y - 12); ctx.fill();
+  nameTag(`${D.KINGDOMS[k].short}の使者`, x, y - 26, '#ffe9a8');
+  ctx.fillStyle = '#ffe08a'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('！', x, y - 34 + Math.sin(TT * 5) * 2);
+}
+function drawHornet(x, y, a, hit, phase, loot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  ell(ctx, -2, 14, 16, 8, 0, 'rgba(0,0,0,.25)');
+  const fl = Math.sin(TT * 60) * .35;
+  ctx.globalAlpha = .55; ell(ctx, -2, -10, 13, 5, -.5 + fl, '#eef6ff'); ell(ctx, -2, 10, 13, 5, .5 - fl, '#eef6ff'); ctx.globalAlpha = 1;
+  ell(ctx, -10, 0, 11, 7, 0, hit ? '#fff' : '#e8b020');
+  for (let k = 0; k < 3; k++) ctx.fillStyle = '#2a1a08', ctx.fillRect(-17 + k * 6, -6, 2.5, 12);
+  ell(ctx, 2, 0, 5, 4.5, 0, '#4a3010'); ell(ctx, 9, 0, 5, 5, 0, hit ? '#fff' : '#e8b020'); circ(ctx, 11, -2.5, 1.6, '#200'); circ(ctx, 11, 2.5, 1.6, '#200');
+  ln(ctx, [[-21, 0], [-26, 0]], '#2a1a08', 1.5);
+  if (loot) drawIcon(ctx, loot, 4, 12, 14);
+  ctx.restore();
+}
+function drawKTownDecor(l) {
+  const T = D.T, col = KCOL[l];
+  const rooms = [[4, 11, 2, '📦 受付（注文の納品）'], [15, 21, 2, '🏅 メダル交換所'], [25, 33, 1, '👑 王の間'], [7, 13, 12, '🏠 民家'], [20, 29, 12, '🌳 広場']];
+  for (const [a, b, ty, name] of rooms) {
+    const x = a * T, w = (b - a + 1) * T, y = ty * T - 2;
+    for (let k = 0; k < (b - a + 1) * 2; k++) { ctx.fillStyle = k % 2 ? '#f2e6c8' : col[0]; ctx.fillRect(x + k * 16, y, 16, 10); }
+    for (let k = 0; k < (b - a + 1) * 2; k++) { ctx.fillStyle = k % 2 ? '#f2e6c8' : col[0]; ctx.beginPath(); ctx.arc(x + k * 16 + 8, y + 10, 8, 0, Math.PI); ctx.fill(); }
+    ctx.font = 'bold 9px sans-serif'; const tw = ctx.measureText(name).width + 14;
+    ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(x + w / 2 - tw / 2, y - 14, tw, 14);
+    ctx.fillStyle = '#ffe9a8'; ctx.textAlign = 'center'; ctx.fillText(name, x + w / 2, y - 4);
+  }
+  if (l === 'k1') for (let k = 0; k < 10; k++) { const x = (2 + k * 3.3) * T, y = (k % 2 ? 11.3 : 6.2) * T; ell(ctx, x, y, 9, 5, k, 'rgba(90,160,60,.5)'); }
+  if (l === 'k3') for (let k = 0; k < 14; k++) { const x = (2 + k * 2.4) * T, y = (6.3 + (k % 3) * 2.2) * T, tw = (TT * 2 + k) % 3; if (tw < .4) { ctx.fillStyle = `rgba(255,240,170,${1 - tw / .4})`; ctx.font = '10px sans-serif'; ctx.fillText('✦', x, y); } }
+}
+function drawKFolk(l) {
+  const T = D.T, len = 32 * T, col = KCOL[l];
+  for (let k = 0; k < 8; k++) {
+    const dir = k % 2 ? 1 : -1, sp = 28 + k * 5;
+    let x = ((TT * sp + k * 230) % len + len) % len; if (dir < 0) x = len - x;
+    const y = (6.6 + (k * 0.55) % 4.4) * T, X = T * 1.5 + x, a = dir > 0 ? 0 : Math.PI;
+    drawAnt(X, y, a, k % 2 ? col[0] : col[1], l === 'k2' ? .66 : .6, TT * sp * .35, l === 'k1' ? 'leaf' : l === 'k2' ? (k % 3 ? 'pebble' : 'shell') : (k % 3 ? null : 'crystal'), 0);
+    if (l === 'k3') { ctx.globalAlpha = .45; ell(ctx, X - 4, y - 6, 9, 3.5, -.4, '#eef'); ell(ctx, X - 4, y + 6, 9, 3.5, .4, '#eef'); ctx.globalAlpha = 1; }
+  }
+}
+function drawKingObj(o, tx, ty) {
+  const T = D.T, x = tx * T + 16, y = ty * T + 16, l = me.l, col = isKing(l) ? KCOL[l] : KCOL.k1, K = isKing(l) ? D.KINGDOMS[l] : null;
+  switch (o.t) {
+    case 'npcTrade': npcAnt(x, y, col[0], col[1], '受付係（注文の納品）'); return true;
+    case 'npcMedal': npcAnt(x, y, col[0], '#e2b45c', 'メダル交換係'); return true;
+    case 'npcCitizen': npcAnt(x, y, col[1], col[0], `${K ? K.short : ''}の住民`); return true;
+    case 'npcKing': {
+      const bob = Math.sin(TT * 1.5) * 1;
+      drawAnt(x, y + 8 + bob, Math.PI / 2, col[0], 1.15, 0, null, 0);
+      ctx.fillStyle = '#ffd75a'; ctx.beginPath(); ctx.moveTo(x - 9, y + 20); for (let k = 0; k <= 4; k++) ctx.lineTo(x - 9 + k * 4.5, y + 14 + (k % 2 ? 6 : 0)); ctx.lineTo(x + 9, y + 20); ctx.fill();
+      if (l === 'k3') { ctx.globalAlpha = .5; ell(ctx, x - 14, y, 16, 6, -.6, '#eef'); ell(ctx, x + 14, y, 16, 6, .6, '#eef'); ctx.globalAlpha = 1; }
+      nameTag(`👑 ${K ? K.short : ''}の王`, x, y - 12, '#ffe08a'); return true;
+    }
+    case 'throne': ctx.fillStyle = col[2]; ctx.beginPath(); ctx.roundRect(x - 20, y - 10, 40, 24, 6); ctx.fill(); ctx.fillStyle = col[0]; ctx.fillRect(x - 16, y - 6, 32, 6); circ(ctx, x, y - 10, 5, '#ffd75a'); return true;
+    case 'tradeDesk': ctx.fillStyle = '#6b4524'; ctx.fillRect(x - 15, y - 9, 30, 20); ctx.fillStyle = '#8a5c32'; ctx.fillRect(x - 15, y - 9, 30, 4); for (let k = 0; k < 3; k++) { ctx.fillStyle = ['#c8a060', '#a07040', '#d8b070'][k]; ctx.fillRect(x - 12 + k * 9, y - 3, 7, 7); } return true;
+    case 'medalShelf': ctx.fillStyle = '#5a3d1e'; ctx.fillRect(x - 15, y - 13, 30, 26); for (let k = 0; k < 4; k++) circ(ctx, x - 9 + (k % 2) * 18, y - 5 + Math.floor(k / 2) * 11, 4.5, '#e8c04a'); return true;
+    case 'banner': { ln(ctx, [[x, y + 12], [x, y - 16]], '#7a5530', 2); const wv = Math.sin(TT * 3 + tx) * 2; ctx.fillStyle = col[0]; ctx.beginPath(); ctx.moveTo(x, y - 16); ctx.lineTo(x + 14, y - 12 + wv); ctx.lineTo(x, y - 6); ctx.fill(); return true; }
+    case 'orderBoard':
+      ctx.fillStyle = '#5a3a1a'; ctx.fillRect(x - 2, y, 4, 14); ctx.fillStyle = '#8a5c32'; ctx.fillRect(x - 17, y - 15, 34, 20);
+      (trade ? trade.orders : []).slice(0, 3).forEach((od, k) => { ctx.fillStyle = KCOL[od.k][0]; ctx.fillRect(x - 14 + k * 10, y - 12, 8, 13); });
+      nameTag(`📋 注文ボード${trade && trade.orders.length ? `（${trade.orders.length}件）` : ''}`, x, y - 19, '#ffe9a8'); return true;
+    case 'sign': if (!K) return false;
+      ctx.fillStyle = '#5a3a1a'; ctx.fillRect(x - 2, y - 4, 4, 18); ctx.fillStyle = col[2]; ctx.fillRect(x - 30, y - 16, 60, 14);
+      ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(K.n, x, y - 6); return true;
+  }
+  return false;
+}
+// ---- 注文のチケット（画面左） ----
+function drawOrders(y, ms) {
+  if (!trade || !trade.orders.length || !ms || ms[9]) return y;
+  const now = nowAbs(), x = 10, W = 236;
+  ctx.textAlign = 'left';
+  const list = [...trade.orders].sort((a, b) => a.due - b.due).slice(0, 3);
+  for (const o of list) {
+    const K = D.KINGDOMS[o.k], need = Object.entries(o.need), h = 40;
+    ctx.fillStyle = 'rgba(20,14,8,.82)'; ctx.fillRect(x, y, W, h);
+    ctx.fillStyle = KCOL[o.k][0]; ctx.fillRect(x, y, 5, h);
+    const left = o.due - now, frac = clamp(left / Math.max(.01, o.due - o.start), 0, 1);
+    ctx.font = 'bold 11px sans-serif'; ctx.fillStyle = '#f0d9a8'; ctx.fillText(`${o.special ? '⭐' : '📦'} ${K.n}`, x + 10, y + 13);
+    ctx.font = '10px sans-serif'; ctx.fillStyle = frac < .25 ? '#ff8a7a' : '#c8b796'; ctx.textAlign = 'right'; ctx.fillText(leftStr(left), x + W - 6, y + 13); ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(x + 10, y + 17, W - 16, 3); ctx.fillStyle = frac < .25 ? '#e74c3c' : frac < .6 ? '#e8c13a' : '#6fcf6f'; ctx.fillRect(x + 10, y + 17, (W - 16) * frac, 3);
+    let ix = x + 10;
+    for (const [id, n] of need) {
+      const hv = cnt(id); drawIcon(ctx, id, ix + 8, y + 30, 15);
+      ctx.font = 'bold 10px sans-serif'; ctx.fillStyle = hv >= n ? '#9be39b' : '#fff'; const s = `${Math.min(hv, n)}/${n}`; ctx.fillText(s, ix + 17, y + 34);
+      ix += 22 + ctx.measureText(s).width;
+    }
+    y += h + 4;
+  }
+  return y;
+}
+function orderArrow(ms) {
+  if (!trade || !trade.orders.length || me.l !== 's' || !ms || ms[9] || lostNow()) return;
+  const now = nowAbs(), o = [...trade.orders].sort((a, b) => a.due - b.due)[0];
+  const ready = Object.entries(o.need).every(([id, n]) => cnt(id) >= n);
+  if (!ready) return;
+  const g = D.KINGDOMS[o.k].gate;
+  arrow(g.x, g.y, `${D.KINGDOMS[o.k].short}の国へ納品`, 'rgba(255,170,70,.95)');
+}
+function drawDelivered(dt) {
+  const f = deliveredFx; if (!f) return;
+  f.t -= dt; if (f.t <= 0) { deliveredFx = null; return; }
+  const K = D.KINGDOMS[f.k], al = Math.min(1, f.t / 1, (7 - f.t) * 3), W = 420, H = 190, x = VW / 2 - W / 2, y = VH / 2 - H / 2 - 40;
+  ctx.globalAlpha = al;
+  ctx.fillStyle = 'rgba(20,14,8,.92)'; ctx.fillRect(x, y, W, H); ctx.fillStyle = KCOL[f.k][0]; ctx.fillRect(x, y, W, 6);
+  ctx.strokeStyle = '#e2b45c'; ctx.lineWidth = 2; ctx.strokeRect(x, y, W, H);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#ffe08a'; ctx.font = 'bold 22px sans-serif'; ctx.fillText(`🎉 ${K.n}に納品！`, VW / 2, y + 38);
+  const shown = Math.min(3, Math.floor((7 - f.t) * 3));
+  ctx.font = 'bold 40px sans-serif';
+  for (let k = 0; k < 3; k++) { ctx.fillStyle = k < f.stars && k < shown ? '#ffd75a' : 'rgba(255,255,255,.15)'; ctx.fillText('★', VW / 2 - 50 + k * 50, y + 88); }
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.fillText(`かかった時間 ${f.time}　／　届けた人 ${f.by}`, VW / 2, y + 116);
+  ctx.fillStyle = '#9be39b'; ctx.font = 'bold 15px sans-serif';
+  ctx.fillText(`🏅 ${K.short}メダル +${f.medals}${f.hot ? '（人気の品 ×1.5！）' : ''}　🎁 ${f.gift.map(([id, n]) => `${D.ITEMS[id].n}×${n}`).join('・')}`, VW / 2, y + 142);
+  if (f.lvUp) { ctx.fillStyle = '#ffb0d0'; ctx.fillText(f.ally ? `🤝 信頼度5！ ${K.n}と同盟を結んだ！ 毎朝贈り物が届く` : `💗 信頼度が ${f.lvUp} に上がった！ 交換所に新しい品が並ぶ`, VW / 2, y + 170); }
+  ctx.globalAlpha = 1;
+}
+function holdRing() {
+  if (!eHold && !actHold) return;
+  const h = eHold || actHold, k = clamp((performance.now() - h.t0) / 700, 0, 1);
+  if (!ridingC() || k < .15 || h.fired) return;
+  const sx = VW / 2, sy = VH / 2 - 34;
+  ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(sx, sy, 14, 0, 7); ctx.stroke();
+  ctx.strokeStyle = '#ffe08a'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(sx, sy, 14, -Math.PI / 2, -Math.PI / 2 + k * Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('降りる', sx, sy + 30);
+}
+function tradeGuideHTML() {
+  if (!trade) return '';
+  const rows = KL.map(k => { const K = D.KINGDOMS[k], r = trade.rep[k]; return `<div class="qstep"><b style="color:${KCOL[k][0]}">${K.n}</b>　信頼度 ${'💗'.repeat(r.lv)}${'・'.repeat(5 - r.lv)}　🏅 ${trade.medals[k]}枚　<small>好きな物：${K.likes.slice(0, 5).map(id => D.ITEMS[id].n).join('・')} など</small></div>`; }).join('');
+  return `<h3>🤝 他のアリの国と交易</h3>
+    <div class="qstep">巣の中の <b>📋 注文ボード</b> に、ほかの国からの注文が届く（毎朝・のんびり2件まで）。品物を集めて、地図の端にある国の門（F で入る）→ <b>受付</b>で納品しよう。早く届けるほど ★ が増えてメダルが多い。</div>
+    <div class="qstep">メダルはその国の <b>メダル交換所</b> で特別な品と交換できる。信頼度が上がると品が増え、<b>5で同盟</b>（毎朝贈り物）。</div>
+    <div class="qstep">重い荷物は <b>🛒 荷車</b>（作業台）で。仲間と引くと速く、ダンゴムシに乗ってEでつなぐともっと速い。<b>土の道・石畳</b>を敷くと速くなる。遠くでは <b>🐝 スズメバチ</b>が荷物を盗みに来る（倒せば取り返せる）。</div>
+    <div class="qstep">クロアリの国へは <b>川</b> を渡る：<b>小枝の橋</b>を水の上に置くか、<b>葉っぱのボート</b>を持っていれば流されにくく溺れない。道の途中に <b>⛺ 中継キャンプ</b> を置くと、そこで復活できて荷物も置ける。</div>${rows}`;
+}
+// ---- 交易のパネル ----
+function needRows(need, k) {
+  return Object.entries(need).map(([id, n]) => { const hv = cnt(id); return `<span class="${hv >= n ? 'ok' : 'ng'}"><img src="${iconURL(id)}" style="width:18px;vertical-align:middle"> ${D.ITEMS[id].n} ${hv}/${n}</span>`; }).join('　');
+}
+function orderCard(o, btn) {
+  const K = D.KINGDOMS[o.k], left = o.due - nowAbs(), ready = Object.entries(o.need).every(([id, n]) => cnt(id) >= n);
+  const hot = trade && trade.market && Object.keys(o.need).includes(trade.market.hot[o.k]);
+  return `<div class="errand" style="border-left:6px solid ${KCOL[o.k][0]}"><b>${o.special ? '⭐ 特別注文　' : ''}${K.n}</b>　<small>${leftStr(left)}</small>${hot ? '　<b style="color:#ffb070">🔥人気の品入り（メダル1.5倍）</b>' : ''}<br>
+    ${needRows(o.need)}<br><small>お礼：🏅メダル ${o.medals}〜${Math.round(o.medals * 1.5)}　🎁 ${o.gift.map(([id, n]) => `${D.ITEMS[id].n}×${n}`).join('・')}</small>
+    ${btn ? `<div style="margin-top:6px"><button class="btnx go" data-deliver="${o.id}">${ready ? '納品する' : '納品する（荷車の中身も使える）'}</button></div>` : ''}</div>`;
+}
+function tradePanelHTML() {
+  if (panel === 'orders') {
+    const t = trade; if (!t) return ['📋 注文ボード', '', ''];
+    const m = t.market;
+    const hot = m ? KL.map(k => `<span style="color:${KCOL[k][0]}">${D.KINGDOMS[k].short}：🔥${D.ITEMS[m.hot[k]].n}</span>`).join('　') : '';
+    return ['📋 注文ボード', `<div class="talk">注文の品を集めて、その国の門から入って<b>受付</b>に届けよう。地図（M）で門の場所がわかる。</div>
+      ${t.orders.length ? t.orders.map(o => orderCard(o, false)).join('') : '<div class="empty">いまは注文がない。明日の朝を待とう</div>'}
+      <div class="qstep">🔥 今日の人気の品（入った注文はメダル1.5倍）<br>${hot}</div>
+      <div class="qstep">${KL.map(k => `<b style="color:${KCOL[k][0]}">${D.KINGDOMS[k].short}</b> 💗${t.rep[k].lv}/5 🏅${t.medals[k]}`).join('　')}　／　納品した数 ${t.done}</div>`, '注文は毎朝届く（期限切れになると信頼度が少し下がる）'];
+  }
+  const n = npc, K = D.KINGDOMS[n.k], t = trade;
+  if (panel === 'trade') {
+    const os = t ? t.orders.filter(o => o.k === n.k) : [];
+    return [`📦 ${K.n}・受付`, `<div class="talk"><b>受付係</b><br>${os.length ? '注文の品を持ってきてくれたかい？ 門の近くに止めた荷車の中身も使えるよ' : 'いまはあなたたちへの注文はないよ。巣の注文ボードを見てごらん'}</div>${os.map(o => orderCard(o, true)).join('')}`, '早く届けるほど ★ が増える（期限の40%以内で★3）'];
+  }
+  if (panel === 'medal') {
+    const md = t ? t.medals[n.k] : n.medals, lv = t ? t.rep[n.k].lv : n.rep.lv;
+    const shop = D.KSHOP[n.k].map((it, i) => `<div class="sr"><img src="${iconURL(it.id)}"><div class="nm">${D.ITEMS[it.id].n}${it.n > 1 ? ' ×' + it.n : ''}${lv < it.lv ? `<br><small>🔒 信頼度${it.lv}で解放</small>` : ''}</div><div class="pr">🏅 ${it.price}</div><button class="btnx go" data-kbuy="${i}" ${lv >= it.lv && md >= it.price ? '' : 'disabled'}>交換</button></div>`).join('');
+    const buy = (n.buy || []).map(([id, p]) => `<div class="sr"><img src="${iconURL(id)}"><div class="nm">${D.ITEMS[id].n}（${cnt(id)}）${n.hot === id ? ' 🔥' : ''}</div><div class="pr">1つ 🏅${p}</div><button class="btnx" data-ksell="${id}" ${cnt(id) ? '' : 'disabled'}>1つ</button><button class="btnx go" data-ksell="${id}" data-all="1" ${cnt(id) ? '' : 'disabled'}>全部</button></div>`).join('');
+    return [`🏅 ${K.n}・メダル交換所`, `<div class="talk"><b>メダル交換係</b><br>メダルで特別な品と交換できるよ。信頼度が上がると品が増える</div>
+      <div class="tabs2"><span class="money">🏅 ${K.short}メダル ${md}枚　💗 信頼度 ${lv}/5</span></div>
+      <div class="shoplist">${shop}<div class="grp">今日ほしい物（メダルと交換）</div>${buy}</div>`, '同盟（信頼度5）になると毎朝、巣の入口に贈り物が届く'];
+  }
+  if (panel === 'king' || panel === 'citizen') {
+    const r = n.rep;
+    return [panel === 'king' ? `👑 ${K.n}・王の間` : `🏠 ${K.n}の住民`, `<div class="talk"><b>${panel === 'king' ? `${K.short}の王` : '住民'}</b><br>${n.lines.map(esc).join('<br>')}</div>${r ? `<div class="qstep">信頼度 ${'💗'.repeat(r.lv)}${'・'.repeat(5 - r.lv)}（${r.lv}/5）</div>` : ''}`, ''];
+  }
+  if (panel === 'envoy') {
+    return [`🚩 ${K.n}の使者`, `<div class="talk"><b>使者</b><br>我が国から特別な注文を持ってきました。期限は短いですが、お礼はたっぷりです。引き受けてくださいますか？</div>${orderCard(n.order, false)}
+      <div style="text-align:center;margin-top:8px"><button class="btnx go" id="envoyYes">引き受ける</button>　<button class="btnx" id="envoyNo">今回はやめておく</button></div>`, '特別注文は信頼度も多めに上がる'];
+  }
+  return ['', '', ''];
+}
+
 // ================= 受信 =================
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 socket.on('world', d => {
@@ -361,6 +722,9 @@ socket.on('world', d => {
   under = b64(d.under); town = b64(d.town);
   grids.u = under; grids.u2 = b64(d.under2); grids.u3 = b64(d.under3);
   sand = d.sand || []; pits = d.pits || []; puddles = d.puddles || [];
+  river = d.river || null; ponds = d.ponds || []; logs = d.logs || []; meadows = d.meadows || []; hills = d.hills || []; treasures = d.treasures || []; wm = null;
+  ktown = D.KTOWN ? b64(D.KTOWN) : null; for (const k of KL) if (D.KINGDOMS) LAYER_NAME[k] = D.KINGDOMS[k].n;
+  for (const k in RCA) delete RCA[k]; envoy = 0; deliveredFx = null;
   EXW = Math.ceil(D.SW / 4); EXH = Math.ceil(D.SH / 4);
   expKey = 'antExp_' + d.code; explored = new Uint8Array(EXW * EXH); expDirty = true;
   try {
@@ -399,8 +763,13 @@ socket.on('grass', list => { for (const [i, g] of list) grass.set(i, g); });
 socket.on('objs', list => { for (const { l, i, o } of list) { if (o) objs[l].set(i, o); else objs[l].delete(i); } mmDirty = true; });
 socket.on('chest', d => {
   if (d.update && !(panel === 'chest' && chest && chest.l === d.l && chest.i === d.i)) return;
+  if (d.update && chest) d = Object.assign({}, chest, d);
   chest = d; openPanel('chest');
 });
+socket.on('chestClose', () => closePanel());
+socket.on('trade', d => { trade = d; if (['orders', 'trade', 'medal', 'king', 'envoy'].includes(panel) || panel === 'craft') renderPanel(); });
+socket.on('delivered', d => { deliveredFx = { ...d, t: 7 }; shake = 0.2; });
+socket.on('treasures', t => treasures = t || []);
 socket.on('openCraft', d => { openPanel('craft'); if (d && d.tab === 'cook') setTimeout(() => { const g = document.querySelector('#pbody .grp.cook'); if (g) g.scrollIntoView({ block: 'start' }); }, 30); });
 socket.on('msg', t => { msgs.push({ t, life: 6 }); if (msgs.length > 6) msgs.shift(); });
 socket.on('gameover', d => gameover = { day: d.day, t: 7 });
@@ -420,6 +789,8 @@ socket.on('st', s => {
   sync(RP, s.p.filter(p => p[0] !== MEID).map(p => ({ id: p[0], x: p[4], y: p[5], a: p[6], d: p, l: p[3] })));
   sync(RE, s.e.map(e => ({ id: e[0], x: e[3], y: e[4], a: e[5], d: e, l: e[2] })));
   sync(RCR, (s.cr || []).map(c => ({ id: c[0], x: c[3], y: c[4], a: c[5], d: c, l: c[2] })));
+  sync(RCA, (s.ca || []).map(c => ({ id: c[0], x: c[1], y: c[2], a: c[3], d: c, l: 0 })));
+  envoy = s.env || 0;
   const seen = {};
   for (const c of s.cb) { seen[c[0]] = 1; const r = RC[c[0]] || (RC[c[0]] = { x: c[1], y: c[2] }); r.tx = c[1]; r.ty = c[2]; r.n = c[3]; }
   for (const id in RC) if (!seen[id]) delete RC[id];
@@ -487,7 +858,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyJ') panel === 'journal' ? closePanel() : openPanel('journal');
   if (e.code === 'KeyM') bigMap = !bigMap;
   if (e.code === 'Escape') { if (!$('story').classList.contains('hidden')) $('storyBtn').click(); closePanel(); bigMap = false; }
-  if (e.code === 'KeyE' && !e.repeat) interactFront();
+  if (e.code === 'KeyE' && !e.repeat) { if (ridingC()) eHold = { t0: performance.now() }; else interactFront(); }   // 乗っている時は長押しで降りる
   if (e.code === 'KeyO' && !e.repeat) placeFront();
   if (e.code === 'KeyF') socket.emit('enter');
   if (e.code === 'KeyQ') socket.emit('drop', sel);
@@ -500,7 +871,10 @@ addEventListener('keydown', e => {
     else socket.emit('mash');
   }
 });
-addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'KeyE' && eHold) { const h = eHold; eHold = null; if (!h.fired) interactFront(); }
+});
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.l = false; });
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 cv.addEventListener('mousedown', e => {
@@ -532,35 +906,21 @@ function kAim() {
   if (best) return { x: best.x, y: best.y, enemy: true };
   return frontPoint(28);
 }
-const INTERACT = { stove: 1, aphidHut: 1, mushBed: 1, chest: 1, bench: 1, bed: 1, clue: 1, clue3: 1, cocoon: 1, queenCocoon: 1, npcShop: 1, shelf: 1, gachaMachine: 1, npcGacha: 1, betTable: 1, npcBet: 1, board: 1 };
+const INTERACT = { nectarFlower: 1, camp: 1, orderBoard: 1, npcTrade: 1, tradeDesk: 1, npcMedal: 1, medalShelf: 1, npcKing: 1, throne: 1, npcCitizen: 1, stove: 1, aphidHut: 1, mushBed: 1, chest: 1, bench: 1, bed: 1, clue: 1, clue3: 1, cocoon: 1, queenCocoon: 1, npcShop: 1, shelf: 1, gachaMachine: 1, npcGacha: 1, betTable: 1, npcBet: 1, board: 1 };
 function nearCube() {
   if (me.l !== 's') return null;
   let best = null, bd = 1e9;
   for (const id in RC) { const c = RC[id], d = Math.hypot(c.x - me.x, c.y - me.y); if (d < D.CUBE_R + D.PR + 46 && d < bd) { bd = d; best = c; } }
   return best;
 }
-function interactFront() {
+function interactFront() {                    // E：目の前にあるものだけに触れる
   if (!inGame()) return;
   const ms = myState();
-  if (ms && ms[18]) { socket.emit('use', { x: me.x, y: me.y }); return; }      // 角砂糖を離す
-  if (inv[sel] && D.ITEMS[inv[sel].id].tool) { socket.emit('use', { x: me.x, y: me.y }); return; }   // ロープ・刺激臭の玉
-  if (ms && ms[24]) { socket.emit('use', { x: me.x, y: me.y }); return; }      // ダンゴムシから降りる
-  const W = LW(me.l), T = D.T, cx0 = Math.floor(me.x / T), cy0 = Math.floor(me.y / T);
-  let best = null, bs = 1e9;
-  for (let ty = cy0 - 3; ty <= cy0 + 3; ty++) for (let tx = cx0 - 3; tx <= cx0 + 3; tx++) {
-    const o = objs[me.l].get(ty * W + tx);
-    if (!o || !INTERACT[o.t]) continue;
-    const x = (tx + .5) * T, y = (ty + .5) * T, d = Math.hypot(x - me.x, y - me.y);
-    if (d > D.REACH) continue;
-    const sc = d + angDiff(Math.atan2(y - me.y, x - me.x), me.a) * 40;
-    if (sc < bs) { bs = sc; best = { x, y }; }
-  }
-  const c = nearCube();
-  if (c && (!best || Math.hypot(c.x - me.x, c.y - me.y) < bs)) { socket.emit('use', { x: c.x, y: c.y }); return; }
-  const cr = nearCritter();
-  if (cr && (!best || cr.sc < bs)) { socket.emit('use', { x: cr.x, y: cr.y }); return; }
-  if (best) socket.emit('use', best);
-  else if (canEnter()) socket.emit('enter');
+  if (ms && (ms[18] || ms[28])) { socket.emit('use', { x: me.x, y: me.y }); return; }   // 角砂糖・荷車を離す
+  if (inv[sel] && D.ITEMS[inv[sel].id].tool) { socket.emit('use', { x: me.x, y: me.y }); return; }   // ロープ・刺激臭の玉・荷車など
+  const t = frontTarget();
+  if (t) { socket.emit('use', { x: t.x, y: t.y }); return; }
+  if (canEnter()) socket.emit('enter');
   else socket.emit('eat');
 }
 function nearCritter() {                     // 目の前のアブラムシ・ダンゴムシ
@@ -579,7 +939,7 @@ function placeFront() {
   const s = inv[sel];
   if (!s || !D.ITEMS[s.id].place) return;
   const p = frontPoint(38);
-  socket.emit('use', { x: (Math.floor(p.x / D.T) + .5) * D.T, y: (Math.floor(p.y / D.T) + .5) * D.T });
+  socket.emit('use', { x: (Math.floor(p.x / D.T) + .5) * D.T, y: (Math.floor(p.y / D.T) + .5) * D.T, place: 1 });
 }
 
 // ---- タッチ操作（iPad） ----
@@ -592,8 +952,8 @@ function hotbarHit(x, y) {
 }
 function canEnter() {
   if (!D) return false;
-  if (me.l === 's') return Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30 || (townPos && Math.hypot(me.x - townPos.x, me.y - townPos.y) < 60);
-  if (me.l === 't') return Math.hypot(me.x - (D.TEXIT.tx + .5) * D.T, me.y - (D.TEXIT.ty + .5) * D.T) < D.T * 1.6;
+  if (me.l === 's') return Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30 || (townPos && Math.hypot(me.x - townPos.x, me.y - townPos.y) < 60) || !!gateNear();
+  if (isTownL(me.l)) return Math.hypot(me.x - (D.TEXIT.tx + .5) * D.T, me.y - (D.TEXIT.ty + .5) * D.T) < D.T * 1.6;
   return !!nearExit();
 }
 function nearExit() {                       // 地下で近くにある出入口・階段
@@ -614,8 +974,8 @@ function touchButtons() {
   const extra = isUnder(me.l) && me.l !== 'u3' ? [{ id: 'down', label: ddTouch ? '掘り中…' : '下へ掘る', x: VW - 194, y: y1, r }] : [];
   return [...extra,
     { id: 'inv', label: '持ち物', x: x1, y: y1, r }, { id: 'craft', label: 'クラフト', x: x2, y: y1, r },
-    { id: 'eat', label: inv[sel] && D.ITEMS[inv[sel].id].tool ? '使う' : inv[sel] && D.ITEMS[inv[sel].id].cool ? '飲む' : '食べる', x: x1, y: y2, r }, { id: 'enter', label: me.l === 's' ? '入る' : me.l === 't' ? '地上へ' : ({ down: '降りる', up: '上がる', out: '地上へ' }[(nearExit() || {}).kind] || '出入り'), x: x2, y: y2, r, on: canEnter() },
-    { id: 'journal', label: '目標', x: x1, y: y3, r }, { id: 'act', label: myState() && myState()[24] ? '降りる' : 'つかむ/話す', x: x2, y: y3, r },
+    { id: 'eat', label: inv[sel] && D.ITEMS[inv[sel].id].tool ? '使う' : inv[sel] && D.ITEMS[inv[sel].id].cool ? '飲む' : '食べる', x: x1, y: y2, r }, { id: 'enter', label: me.l === 's' ? (gateNear() ? '国へ入る' : '入る') : isTownL(me.l) ? '地上へ' : ({ down: '降りる', up: '上がる', out: '地上へ' }[(nearExit() || {}).kind] || '出入り'), x: x2, y: y2, r, on: canEnter() },
+    { id: 'journal', label: '目標', x: x1, y: y3, r }, { id: 'act', label: ridingC() ? '長押しで降りる' : 'つかむ/話す', x: x2, y: y3, r },
     { id: 'map', label: bigMap ? '閉じる' : '地図', x: x2 - 72, y: y3, r: 24 },
   ];
 }
@@ -637,7 +997,7 @@ cv.addEventListener('touchstart', e => {
   for (const t of e.changedTouches) {
     const x = t.clientX, y = t.clientY;
     const b = touchButtons().find(b => Math.hypot(b.x - x, b.y - y) < b.r + 8);
-    if (b) { pressBtn(b.id); continue; }
+    if (b) { if (b.id === 'act' && ridingC()) { actHold = { id: t.identifier, t0: performance.now() }; continue; } pressBtn(b.id); continue; }
     const h = hotbarHit(x, y);
     if (h >= 0) { setSel(h); continue; }
     if (!joy && x < VW * 0.42 && y > 160) { joy = { id: t.identifier, ox: x, oy: y, x, y }; continue; }
@@ -657,6 +1017,7 @@ cv.addEventListener('touchmove', e => {
 function touchEnd(e) {
   e.preventDefault();
   for (const t of e.changedTouches) {
+    if (actHold && t.identifier === actHold.id) { const h = actHold; actHold = null; if (!h.fired) interactFront(); continue; }
     if (joy && t.identifier === joy.id) joy = null;
     if (wt && t.identifier === wt.id) {
       if (!wt.hold) { const a = aim(); socket.emit('use', { x: a.x, y: a.y }); }
@@ -668,8 +1029,8 @@ cv.addEventListener('touchend', touchEnd, { passive: false });
 cv.addEventListener('touchcancel', touchEnd, { passive: false });
 
 // ================= 衝突（サーバーと同じ） =================
-const LW = l => isUnder(l) ? D.UW : l === 't' ? D.TW : D.SW, LH = l => isUnder(l) ? D.UH : l === 't' ? D.TH : D.SH;
-const gridOf = l => isUnder(l) ? grids[l] : l === 't' ? town : null;
+const LW = l => isUnder(l) ? D.UW : isTownL(l) ? D.TW : D.SW, LH = l => isUnder(l) ? D.UH : isTownL(l) ? D.TH : D.SH;
+const gridOf = l => isUnder(l) ? grids[l] : l === 't' ? town : isKing(l) ? ktown : null;
 const isNatSolid = v => (v >= 1 && v <= 6) || v === 8 || v === 11 || v === 12;
 const hasAccC = id => !!((equip.acc1 && equip.acc1.id === id) || (equip.acc2 && equip.acc2.id === id));
 // 外の危険（サーバーと同じ計算）
@@ -679,6 +1040,8 @@ function sunInfoC() {
   return { dx: Math.cos(ang), dy: Math.sin(ang) * 0.5 + 0.35, len: 0.35 + Math.abs(r - 0.5) * 1.3, I: (st.c[2] || st.c[3]) ? 0 : Math.max(0, Math.sin(Math.PI * r)) };
 }
 function shadeAtC(x, y) {
+  if (inLogC(x, y)) return true;
+  { const o = objs.s.get(Math.floor(y / D.T) * D.SW + Math.floor(x / D.T)); if (o && D.OBJ[o.t].cover) return true; }
   for (const t of trees) if (Math.hypot(t.x - x, t.y - y) < t.r + 240) return true;
   const sd = sunInfoC();
   for (const o of rocks) { if (o.k || o.r < 26 || Math.abs(o.x - x) > o.r * 3 || Math.abs(o.y - y) > o.r * 3) continue; if (Math.hypot(o.x + sd.dx * o.r * sd.len - x, o.y + sd.dy * o.r * sd.len - y) < o.r * 0.95) return true; }
@@ -772,7 +1135,12 @@ function iconURL(id) {
 }
 
 // ================= キャラ描画 =================
-function drawAnt(x, y, a, col, s, phase, carry, bite) {
+function drawBoat(x, y, a) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  ell(ctx, 0, 0, 24, 13, 0, '#3f7a22'); ell(ctx, 0, -1, 20, 10, 0, '#5c9a30'); ln(ctx, [[-22, 0], [22, 0]], '#2f5a1a', 1.5);
+  ctx.restore();
+}
+function drawAnt(x, y, a, col, s, phase, carry, bite, hat, pat) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
   ell(ctx, -2, 3, 20, 9, 0, 'rgba(0,0,0,0.3)');
   ctx.strokeStyle = '#1a1008'; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
@@ -784,9 +1152,14 @@ function drawAnt(x, y, a, col, s, phase, carry, bite) {
   ctx.fillStyle = grd; ctx.beginPath(); ctx.ellipse(-11, 0, 8.5, 6.5, 0, 0, 7); ctx.fill();
   ell(ctx, 0, 0, 5, 3.5, 0, '#1b1b1b'); ell(ctx, 8, 0, 5, 4.6, 0, '#1b1b1b');
   if (col) ell(ctx, -11, 0, 3.5, 5.2, 0, col);
+  if (pat === 1) for (const k of [-16, -12.5, -9]) ln(ctx, [[k, -5.3], [k + 1, 5.3]], 'rgba(255,236,190,.85)', 1.4);   // しま模様
+  else if (pat === 2) for (const [px, py] of [[-15, -2.5], [-10, 3], [-12.5, 3.8], [-8.5, -3.2], [-13, -0.2]]) circ(ctx, px, py, 1.3, 'rgba(255,236,190,.9)');   // 水玉
   const open = bite ? 0.8 : 0.25;
   for (const side of [-1, 1]) { ctx.strokeStyle = '#2a1a0a'; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.moveTo(12, side * 2); ctx.quadraticCurveTo(16, side * (2 + open * 6), 17, side * open * 2); ctx.stroke(); }
   for (const side of [-1, 1]) { const w = Math.sin(phase * 0.7 + side) * 1.5; ln(ctx, [[10, side * 2], [15, side * (7 + w)], [21, side * (9 + w)]], '#111', 1.2); }
+  if (hat === 1) { circ(ctx, 6, 0, 5.5, '#f4f2ea'); circ(ctx, 8.5, -3.2, 3.6, '#fff'); circ(ctx, 8.5, 3.2, 3.6, '#fff'); circ(ctx, 10, 0, 3.4, '#fff'); ln(ctx, [[3, -5], [3, 5]], '#d8d4c8', 2); }   // 料理長の帽子
+  else if (hat === 2) { ell(ctx, 8, 0, 6.8, 6.2, 0, '#4a4a56'); ell(ctx, 9, -1.8, 3, 2.4, 0, '#9a9aa8'); ln(ctx, [[2.5, -6.5], [2.5, 6.5]], '#2a2a32', 2.2); }   // 鍛冶のかぶと
+  else if (hat === 3) { ctx.fillStyle = '#ffd75a'; ctx.beginPath(); ctx.moveTo(4, -5.5); for (let k = 0; k <= 4; k++) ctx.lineTo(k % 2 ? 9 : 12.5, -5.5 + k * 2.75); ctx.lineTo(4, 5.5); ctx.closePath(); ctx.fill(); ell(ctx, 5, -7, 7, 2, -.5, '#e88ab8'); }   // 羽のかんむり
   if (carry) drawIcon(ctx, carry, 22, 0, 14);
   ctx.restore();
 }
@@ -837,6 +1210,9 @@ Object.assign(ICON, {
 });
 const UCOL = { 1: ['#6b4a2b', '#4d341d'], 2: ['#a4643a', '#7a4626'], 3: ['#6b4a2b', '#4d341d'], 4: ['#6b4a2b', '#4d341d'], 5: ['#45444b', '#2c2b30'], 6: ['#5f432a', '#3d2a18'], 8: ['#3b2615', '#24170c'], 11: ['#6b4a2b', '#4d341d'], 12: ['#45444b', '#2c2b30'] };
 PAT.town = makePat('#5b4128', ['rgba(0,0,0,.18)', 'rgba(170,130,80,.25)', 'rgba(220,180,120,.15)']);
+PAT.k1 = makePat('#4e5428', ['rgba(0,0,0,.18)', 'rgba(120,170,70,.3)', 'rgba(200,220,140,.15)']);
+PAT.k2 = makePat('#4a4646', ['rgba(0,0,0,.25)', 'rgba(150,150,160,.25)', 'rgba(210,210,220,.12)']);
+PAT.k3 = makePat('#7a6038', ['rgba(0,0,0,.15)', 'rgba(240,200,110,.3)', 'rgba(255,240,190,.2)']);
 const dragSpeedC = n => Math.min(D.DRAG[2], D.DRAG[0] + D.DRAG[1] * (Math.max(1, n) - 1));
 
 // ================= メインループ =================
@@ -852,7 +1228,7 @@ function smooth(store, dt) {
 }
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; TT += dt;
-  if (D && under) { update(dt); smooth(RP, dt); smooth(RE, dt); smooth(RC, dt); smooth(RCR, dt); render(dt); }
+  if (D && under) { update(dt); smooth(RP, dt); smooth(RE, dt); smooth(RC, dt); smooth(RCR, dt); smooth(RCA, dt); render(dt); }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -870,10 +1246,17 @@ function update(dt) {
     if (jl > 0.18) { dx = jx; dy = jy; spd = Math.min(1, jl); }
   }
   const sleeping = ms && ms[16], cube = ms && ms[18] ? RC[ms[18]] : null, trapped = ms && ms[19];
+  const passC = ms && ms[30] ? RCR[ms[30]] : null, cart = ms && ms[28] ? RCA[ms[28]] : null;
+  const wa = me.l === 's' && !passC ? inWaterC(me.x, me.y) : null, fly = hasAccC('wings'), boat = wa && inv.some(q => q && q.id === 'leafBoat');
+  for (const h of [eHold, actHold]) if (h && !h.fired && ridingC() && performance.now() - h.t0 > 700) { h.fired = true; socket.emit('dismount'); }
   if (trapped) { const f = Math.min(1, dt * 12); me.x += (ms[4] - me.x) * f; me.y += (ms[5] - me.y) * f; }   // つかまっている：サーバーの位置に合わせる
   else if (sleeping) {
     wakeT -= dt;
     if ((dx || dy) && wakeT <= 0) { socket.emit('wake'); wakeT = 0.5; }
+  } else if (passC && !dead) {                                         // 鞍のうしろ：ダンゴムシといっしょに動く
+    const ox = me.x, oy = me.y;
+    me.x = passC.x - Math.cos(passC.a) * 12; me.y = passC.y - Math.sin(passC.a) * 12; me.a = passC.a;
+    me.phase += Math.hypot(me.x - ox, me.y - oy) * 0.2;
   } else if (!dead) {
     if (dx || dy) {
       const len = Math.hypot(dx, dy), ox = me.x, oy = me.y;
@@ -883,8 +1266,18 @@ function update(dt) {
       if (cube) spd *= dragSpeedC(cube.n) / D.PLAYER_SPEED;            // 角砂糖を引っぱっている
       if (ms && ms[24]) { spd *= D.RIDE_MULT; const rc = RCR[ms[24]]; if (rc && rc.d[6] & 8) spd *= 0.5; }   // ダンゴムシ（丸まると遅い）
       if (ms && ms[23] && ms[23][0] > 0) spd *= 1.25;                // ミツ団子
+      if (wa && !fly) spd *= boat ? 0.85 : 0.6;                        // 川・池
+      spd *= floorMulC(me.x, me.y);                                    // 土の道・石畳
+      if (ms && ms[24]) for (const id in RCA) { const c = RCA[id]; if (c.d[4] & 1 && Math.hypot(c.x - me.x, c.y - me.y) < 90) { spd *= c.d[4] & 2 ? .85 : .72; break; } }   // 荷車をつないでいる
+      if (cart) {                                                      // 荷車を引っぱっている
+        let n = 0; for (const id in RP) if (RP[id].d[28] == ms[28]) n++; n++;
+        const cs = (n <= 1 ? 80 : n === 2 ? 115 : 140) * (cart.d[4] & 2 ? 1.3 : 1) * floorMulC(cart.x, cart.y) * (inWaterC(cart.x, cart.y) ? .35 : 1);
+        spd = Math.min(spd, cs / D.PLAYER_SPEED + .08);
+      }
       me.x += dx / len * D.PLAYER_SPEED * spd * dt; me.y += dy / len * D.PLAYER_SPEED * spd * dt;
       collide(me.l, me, D.PR);
+      if (ms && ms[24] && me.l === 's' && inWaterC(me.x, me.y) && !inWaterC(ox, oy)) { me.x = ox; me.y = oy; tipNow = '🐾 ダンゴムシは泳げない（橋をかけるか、降りて渡ろう）'; }
+      if (cart) { const cd = Math.hypot(me.x - cart.x, me.y - cart.y), mx = 62; if (cd > mx) { me.x = cart.x + (me.x - cart.x) / cd * mx; me.y = cart.y + (me.y - cart.y) / cd * mx; collide(me.l, me, D.PR); } }
       if (cube) {
         const cd = Math.hypot(me.x - cube.x, me.y - cube.y), mx = D.CUBE_R + D.PR + 34;
         if (cd > mx) { me.x = cube.x + (me.x - cube.x) / cd * mx; me.y = cube.y + (me.y - cube.y) / cd * mx; collide(me.l, me, D.PR); }
@@ -892,7 +1285,8 @@ function update(dt) {
       me.phase += Math.hypot(me.x - ox, me.y - oy) * 0.35;
       if (!mouse.l && !(kHeld && a.enemy) && !cube) me.a = Math.atan2(dy, dx);
     }
-    if (me.l === 's' && !(ms && ms[22])) for (const q of pits) {             // アリジゴクの巣はすべり落ちる
+    if (wa && !fly && !(ms && ms[24])) { const k = boat ? .3 : 1; me.x += wa.fx * k * dt; me.y += wa.fy * k * dt; collide(me.l, me, D.PR); }   // 川に流される
+    if (me.l === 's' && !(ms && ms[22]) && !fly) for (const q of pits) {             // アリジゴクの巣はすべり落ちる
       const d = Math.hypot(me.x - q.x, me.y - q.y);
       if (d < q.r && d > 2) { const pull = 55 * dt * (1.25 - d / q.r); me.x -= (me.x - q.x) / d * pull; me.y -= (me.y - q.y) / d * pull; }
     }
@@ -960,8 +1354,8 @@ function render(dt) {
     }
     drawCrackLines(dx, dy, p[13], 'rgba(20,10,0,.8)');
   }
-  if (L === 's') drawCubes(vis);
-  if (L === 't') drawTownFolk();
+  if (L === 's') { drawCubes(vis); drawCarts(vis); drawEnvoy(); }
+  if (L === 't') drawTownFolk(); else if (isKing(L)) drawKFolk(L);
   for (const id in RE) {                                                          // 敵
     const e = RE[id], d = e.d;
     if (LAYERS[d[2]] !== L || !vis(e.x, e.y, 40)) continue;
@@ -974,6 +1368,7 @@ function render(dt) {
       continue;
     }
     if (d[1] === 4) { drawLadybug(e.x, e.y, e.a, d[7], e.phase * .6); if (d[6] < 100) bar(e.x - 12, e.y - 18, 24, 3, d[6] / 100, '#e74c3c'); continue; }
+    if (d[1] === 5) { drawHornet(e.x, e.y, e.a, d[7], e.phase, d[9]); if (d[6] < 100) bar(e.x - 12, e.y - 20, 24, 3, d[6] / 100, '#e74c3c'); if (d[9]) nameTag('泥棒！', e.x, e.y - 24, '#ffb070'); continue; }
     if (d[1] === 2) drawSpider(e.x, e.y, e.a, e.phase * .3, d[7], 1.15, true);
     else if (d[1] === 0) drawSpider(e.x, e.y, e.a, e.phase * .5, d[7], 0.42); else drawBeetle(e.x, e.y, e.a, e.phase * .6, d[7], 0.5);
     if (d[6] < 100 && d[1] !== 2) bar(e.x - 14, e.y - 22, 28, 3, d[6] / 100, '#e74c3c');
@@ -982,7 +1377,9 @@ function render(dt) {
   for (const id in RP) {                                                          // 仲間
     const p = RP[id], d = p.d;
     if (d[9] || LAYERS[d[3]] !== L || !vis(p.x, p.y, 30)) continue;
-    drawAnt(p.x, p.y, p.a, d[2], 0.7, d[16] ? 0 : p.phase, null, d[11]);
+    if (d[27]) drawBoat(p.x, p.y, p.a);
+    drawAnt(p.x, p.y, p.a, d[2], 0.7, d[16] ? 0 : p.phase, null, d[11], d[25], d[26]);
+    if (d[29] && Math.random() < .3) parts.push({ l: L, x: p.x + (Math.random() - .5) * 14, y: p.y, vx: 0, vy: -25, life: .7, col: '220,240,255', r: 2 });
     if (d[16]) zzz(p.x, p.y);
     nameTag(d[1], p.x, p.y - 18, '#fff');
     bar(p.x - 12, p.y - 15, 24, 2.5, d[7] / 100, '#2ecc71');
@@ -990,7 +1387,9 @@ function render(dt) {
   const ms = myState();
   if (ms && !ms[9]) {                                                             // 自分
     const s = inv[sel];
-    drawAnt(me.x, me.y, me.a, ms[2], 0.7, me.phase, ms[16] || ms[18] ? null : s ? s.id : null, ms[11]);
+    if (ms[27]) drawBoat(me.x, me.y, me.a);
+    drawAnt(me.x, me.y, me.a, ms[2], 0.7, me.phase, ms[16] || ms[18] ? null : s ? s.id : null, ms[11], ms[25], ms[26]);
+    if (ms[29] && Math.random() < .3) parts.push({ l: L, x: me.x + (Math.random() - .5) * 14, y: me.y, vx: 0, vy: -25, life: .7, col: '220,240,255', r: 2 });
     if (ms[16]) zzz(me.x, me.y);
   }
   if (st && st.qn) {                                                              // 女王
@@ -1010,8 +1409,9 @@ function render(dt) {
     if (wb.life <= 0) { webs.splice(i, 1); continue; }
     if (L === 's') ln(ctx, [[wb.x1, wb.y1], [wb.x2, wb.y2]], `rgba(240,240,250,${wb.life})`, 2);
   }
-  if (L === 's') { drawArmy(x0, y0, x1, y1); drawHumanShadows(vis); drawBirdShadow(); }
-  if (!touchMode && !mouse.l && !wt && L !== 't') {                             // 目の前のマス（E/K/Oの対象）
+  if (L === 's') { drawLogs(vis); drawArmy(x0, y0, x1, y1); drawHumanShadows(vis); drawBirdShadow(); }
+  frontT = frontTarget(); drawFrontTarget();
+  if (!touchMode && !mouse.l && !wt && !isTownL(L) && !frontT) {                             // 目の前のマス（E/K/Oの対象）
     const fp = frontPoint(30);
     ctx.strokeStyle = 'rgba(255,230,160,.22)'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
     ctx.strokeRect(Math.floor(fp.x / T) * T + .5, Math.floor(fp.y / T) * T + .5, T - 1, T - 1); ctx.setLineDash([]);
@@ -1280,8 +1680,8 @@ function drawFarmObj(o, x, y, tx, ty) {             // 調理台・アブラム�
 
 // ---- 地下・商店街（マス目） ----
 function drawGrid(l, tx0, ty0, tx1, ty1) {
-  const T = D.T, W = LW(l), g = gridOf(l), isTown = l === 't', COL = l === 'u2' ? UCOL2 : l === 'u3' ? UCOL3 : UCOL;
-  ctx.fillStyle = isTown ? PAT.town : l === 'u2' ? PAT.floor2 : l === 'u3' ? PAT.floor3 : PAT.floor; ctx.fillRect(tx0 * T, ty0 * T, (tx1 - tx0 + 1) * T, (ty1 - ty0 + 1) * T);
+  const T = D.T, W = LW(l), g = gridOf(l), isTown = isTownL(l), COL = l === 'u2' ? UCOL2 : l === 'u3' ? UCOL3 : UCOL;
+  ctx.fillStyle = isKing(l) ? PAT[l] : isTown ? PAT.town : l === 'u2' ? PAT.floor2 : l === 'u3' ? PAT.floor3 : PAT.floor; ctx.fillRect(tx0 * T, ty0 * T, (tx1 - tx0 + 1) * T, (ty1 - ty0 + 1) * T);
   for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
     const i = ty * W + tx, v = g[i], x = tx * T, y = ty * T;
     if (v === 7) {                                                                // 出入口
@@ -1303,7 +1703,7 @@ function drawGrid(l, tx0, ty0, tx1, ty1) {
       continue;
     }
     if (!isNatSolid(v)) continue;
-    const [c1, c2] = isTown ? ['#4a2f1a', '#33200f'] : COL[v];
+    const [c1, c2] = isKing(l) ? [KCOL[l][2], KCOL[l][3]] : isTown ? ['#4a2f1a', '#33200f'] : COL[v];
     ctx.fillStyle = c1; ctx.fillRect(x, y, T, T);
     for (let k = 0; k < 4; k++) circ(ctx, x + hash(tx, ty + k) * T, y + hash(tx + k, ty) * T, 1 + hash(k, i) * 1.5, c2);
     if (isTown && (tx + ty) % 2 === 0) {                                          // ハチの巣もよう
@@ -1320,7 +1720,7 @@ function drawGrid(l, tx0, ty0, tx1, ty1) {
     if (!isNatSolid(below)) { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(x, y + T - 6, T, 6); ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(x, y + T, T, 5); }
     if (!isNatSolid(above)) { ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fillRect(x, y, T, 3); }
   }
-  if (isTown) { drawTownDecor(); return; }
+  if (isTown) { if (isKing(l)) drawKTownDecor(l); else drawTownDecor(); return; }
   for (const [key, t] of cracks) {                                                // 崩れそうな場所（まとめて崩れる）
     const [cl, cis] = key.split(':'); if (cl !== l) continue;
     const i = +cis, tx = i % W, ty = (i / W) | 0;
@@ -1501,6 +1901,7 @@ function lighting(camX, camY, tx0, ty0, tx1, ty1) {
   let a = 0, col = '5,5,25';
   if (isUnder(me.l)) { a = { u: .9, u2: .93, u3: .95 }[me.l]; col = me.l === 'u3' ? '0,2,6' : '4,2,0'; }
   else if (me.l === 't') { a = .45; col = '25,12,0'; }
+  else if (isKing(me.l)) { a = me.l === 'k3' ? .22 : me.l === 'k1' ? .32 : .4; col = '12,10,0'; }
   else {
     if (night) a = .74;
     else if (time > D.DAY_LEN - 20) a = (time - (D.DAY_LEN - 20)) / 20 * .74;
@@ -1520,7 +1921,7 @@ function lighting(camX, camY, tx0, ty0, tx1, ty1) {
   };
   const ms = myState();
   const seeK = ms && ms[23] && ms[23][1] > 0 ? 1.9 : 1;                         // 光るキノコスープ
-  if (ms && !ms[9]) light(me.x, me.y, (isUnder(me.l) ? 130 : me.l === 't' ? 170 : 150) * seeK);
+  if (ms && !ms[9]) light(me.x, me.y, (isUnder(me.l) ? 130 : isTownL(me.l) ? 170 : 150) * seeK);
   for (const id in RP) { const p = RP[id]; if (!p.d[9] && LAYERS[p.d[3]] === me.l) light(p.x, p.y, 100, .8); }
   const W = LW(me.l);
   for (const [i, o] of objs[me.l]) if (D.OBJ[o.t].light) light((i % W + .5) * D.T, ((i / W | 0) + .5) * D.T, o.t === 'lantern' ? 150 : 190);
@@ -1566,6 +1967,7 @@ function drawSurface(tx0, ty0, tx1, ty1, vis) {
       ell(ctx, t.x + Math.cos(a) * d + sway, t.y + Math.sin(a) * d, 14 + hash(k, k) * 16, 9 + hash(k, 1) * 8, a, 'rgba(255,240,170,.07)');
     }
   }
+  drawWater(tx0, ty0, tx1, ty1);
   // 花（上を歩ける）
   for (const d of deco) {
     if (d.t !== 'flower' || !vis(d.x, d.y, 20)) continue;
@@ -1581,6 +1983,7 @@ function drawSurface(tx0, ty0, tx1, ty1, vis) {
   ctx.fillStyle = g; ctx.beginPath(); ctx.arc(n.x, n.y, n.r * 2.2, 0, 7); ctx.fill();
   for (let i = 0; i < 30; i++) { const a = hash(i, 3) * 7, rr = n.r * (.7 + hash(i, 9)); circ(ctx, n.x + Math.cos(a) * rr, n.y + Math.sin(a) * rr, 1.5 + hash(i, 1) * 2.5, 'rgba(160,125,80,.6)'); }
   ell(ctx, n.x, n.y, n.r * .55, n.r * .42, 0, '#120a04');
+  drawGates(vis);
   // 敵の巣穴
   const night = st && st.c[2];
   for (const d of dens) {
@@ -1682,8 +2085,9 @@ function drawCrackLines(x, y, p, col) {
 }
 function drawObj(o, tx, ty) {
   const T = D.T, x = tx * T + 16, y = ty * T + 16;
-  if (D.OBJ[o.t].fixed) { drawTownObj(o, tx, ty); return; }
-  if (o.t === 'stove' || o.t === 'aphidHut' || o.t === 'mushBed') { drawFarmObj(o, x, y, tx, ty); const mx2 = D.OBJ[o.t].hp; if (o.hp < mx2) bar(x - 12, y - 19, 24, 3, o.hp / mx2, '#e2a35c'); return; }
+  if (D.OBJ[o.t].fixed) { if (!drawKingObj(o, tx, ty)) drawTownObj(o, tx, ty); return; }
+  if (drawObj9(o, tx, ty, x, y)) return;
+  if (o.t === 'stove' || o.t === 'aphidHut' || o.t === 'mushBed') { drawFarmObj(o, x, y, tx, ty); if (o.d && o.d[o.t === 'aphidHut' ? 3 : 4]) nameTag('大', x + 14, y - 10, '#ffe08a'); const mx2 = D.OBJ[o.t].hp; if (o.hp < mx2) bar(x - 12, y - 19, 24, 3, o.hp / mx2, '#e2a35c'); return; }
   if (o.t === 'shelter') {                                       // 葉っぱの屋根（下に隠れられる）
     for (const [px, py] of [[x - 18, y + 14], [x + 18, y + 14], [x - 18, y - 12], [x + 18, y - 12]]) ln(ctx, [[px, py], [px, py + 6]], '#7a5530', 2.5);
     ctx.globalAlpha = .8; ell(ctx, x, y, 34, 24, -.15, '#4f9a33'); ell(ctx, x - 4, y - 3, 26, 15, -.15, '#6ab845'); ln(ctx, [[x - 32, y + 6], [x + 32, y - 6]], '#2f6a1f', 2); ctx.globalAlpha = 1;
@@ -1808,7 +2212,7 @@ function journalHTML() {
       ${q.prep.length ? `<div style="margin-top:6px">準備・ヒント</div><ul>${q.prep.map(chk).join('')}</ul>` : ''}</div>`;
     if (i === stage + 1) return `<div class="qstep">🔒 ${i + 1}. ${esc(q.t)}</div>`;
     return `<div class="qstep">🔒 ${i + 1}. ？？？</div>`;
-  }).join('') + dangerGuideHTML() + farmGuideHTML();
+  }).join('') + tradeGuideHTML() + dangerGuideHTML() + farmGuideHTML();
 }
 function farmGuideHTML() {
   const ic = id => `<img src="${iconURL(id)}" style="width:20px;height:20px;vertical-align:middle">`;
@@ -1859,7 +2263,7 @@ function compassTarget() {
   if (tl !== me.l) {
     if (me.l === 'u2' || me.l === 'u3') { const su = nearestStairUp(); if (su) { x = su.x; y = su.y; label = '上への道（目標は上）'; } }
     else if (me.l === 'u') { x = (D.UENT.tx + .5) * D.T; y = (D.UENT.ty + .5) * D.T; label = '出口（目標は地上）'; }
-    else if (me.l === 't') { x = (D.TEXIT.tx + .5) * D.T; y = (D.TEXIT.ty + .5) * D.T; label = '出口（目標は地上）'; }
+    else if (isTownL(me.l)) { x = (D.TEXIT.tx + .5) * D.T; y = (D.TEXIT.ty + .5) * D.T; label = '出口（目標は地上）'; }
     else if (tl === 'u') { x = D.NEST.x; y = D.NEST.y; label = '巣へ（匂いは地下）'; }
     else if (tl === 't' && townPos) { x = townPos.x; y = townPos.y; label = 'アリ商店街へ'; }
   }
@@ -1973,14 +2377,106 @@ const ITEM_INFO = {
   shelter: ['下に入ると鳥と日差しから隠れられる', 'クラフト'], flag: ['近くなら迷子にならない道しるべ', 'クラフト'], crystalLamp: ['明るく照らすランプ', '作業台'],
   rope: ['つかまった仲間や自分を助ける', 'クラフト・道具屋'], repel: ['割るとしばらく敵と軍隊アリが近づけない', '作業台'],
   cloak: ['止まっていれば鳥に見つからない', '作業台'], parasol: ['日差しで体温が上がりにくい', 'クラフト・道具屋'],
-  sensor: ['アリジゴクとカマキリが遠くから見える', '作業台'], floater: ['水たまりで溺れない', 'クラフト・道具屋'],
+  sensor: ['アリジゴクとカマキリが遠くから見える', '作業台'], floater: ['水たまり・川・池で溺れない', 'クラフト・道具屋'],
   mush: ['巣で育てたキノコ。料理の材料', '巣の中のキノコ床'], honeydew: ['アブラムシが出す甘い露。料理の材料。商店街で売れる', '巣の中のアブラムシ小屋'],
   stove: ['近くで料理ができる。巣の外にも置ける', 'クラフト'], aphidHut: ['外のアブラムシを住まわせる（3匹まで）。草を入れると毎朝「甘露」ができる。巣の中に置く', 'クラフト'],
   mushBed: ['葉っぱを入れるとキノコが育つ。深い階ほど早く、地下2階より下では光るキノコもとれる。巣の中に置く', 'クラフト'],
   soup: ['体がすっと冷える', '調理台'], roastSeed: ['腹持ちがいい', '調理台'], jam: ['HPも回復する', '調理台'], dango: ['しばらく足が速くなる', '調理台'],
   mushStir: ['腹持ちがよく、HPも少し回復', '調理台'], glowSoup: ['しばらく暗い所がよく見える', '調理台'], stew: ['HP回復＋しばらくダメージが減る', '調理台'], jelly: ['HPが大きく回復する', '調理台'],
 };
+// ---- v0.9 のアイコン・置物 ----
+const dyeBag = (col, pat) => g => {
+  ell(g, 0, 4, 11, 10, 0, '#8a6a42'); g.fillStyle = '#6b4f2e'; g.fillRect(-4, -10, 8, 6); ln(g, [[-6, -4], [6, -4]], '#3a2a14', 2);
+  circ(g, 0, 5, 6.5, col || '#f0e0c0');
+  if (pat === 1) for (const k of [-3, 0, 3]) ln(g, [[k, 0], [k, 10]], '#5a3a1a', 1.4);
+  if (pat === 2) for (const [x, y] of [[-3, 3], [2, 7], [3, 2], [-2, 8]]) circ(g, x, y, 1.3, '#5a3a1a');
+};
+Object.assign(ICON, {
+  nectar: g => { for (let k = 0; k < 5; k++) { const a = k / 5 * 6.28; ell(g, Math.cos(a) * 7, Math.sin(a) * 7, 6, 4, a, '#f2a0c0'); } const gr = g.createRadialGradient(-1, -1, 1, 0, 0, 7); gr.addColorStop(0, '#fff2a8'); gr.addColorStop(1, '#e8a020'); g.fillStyle = gr; g.beginPath(); g.arc(0, 0, 6, 0, 7); g.fill(); circ(g, -2, -2, 1.6, '#fff'); },
+  honeyBread: g => { ell(g, 0, 3, 13, 9, 0, '#b07a3a'); ell(g, 0, 0, 12, 8, 0, '#d8a060'); for (const x of [-6, 0, 6]) ln(g, [[x - 2, -5], [x + 2, 3]], '#9a6a30', 1.5); ell(g, 2, -5, 6, 3, .2, '#f2b52a'); circ(g, 6, -1, 2, '#f2b52a'); },
+  feast: g => { ell(g, 0, 4, 15, 9, 0, '#e8e0d0'); ell(g, 0, 3, 12, 7, 0, '#f8f4ea'); circ(g, -5, 1, 4.5, '#d6303a'); ell(g, 3, 0, 5, 3.5, .4, '#9a6a3a'); circ(g, 6, 3, 3, '#f2b52a'); ell(g, -1, 5, 4, 2.5, 0, '#4f9a33'); },
+  road: g => { g.fillStyle = '#8a6a42'; g.fillRect(-13, -13, 26, 26); for (let k = 0; k < 8; k++) circ(g, -10 + hash(k, 1) * 20, -10 + hash(1, k) * 20, 1.5, '#6b4a2b'); ln(g, [[-13, -6], [13, -6]], 'rgba(255,240,200,.25)', 1); ln(g, [[-13, 6], [13, 6]], 'rgba(255,240,200,.25)', 1); },
+  pave: g => { g.fillStyle = '#6a6660'; g.fillRect(-13, -13, 26, 26); for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) { g.fillStyle = (r + c) % 2 ? '#b4b0a5' : '#9a968c'; g.fillRect(-12 + c * 8.3 + (r % 2) * 2, -12 + r * 8.3, 7.5, 7.5); } },
+  bridge: g => { for (let k = 0; k < 4; k++) { g.fillStyle = k % 2 ? '#a87a48' : '#946535'; g.fillRect(-13, -12 + k * 6.3, 26, 5.4); } ln(g, [[-11, -13], [-11, 13]], '#5a3a1a', 2); ln(g, [[11, -13], [11, 13]], '#5a3a1a', 2); },
+  leafBoat: g => { g.fillStyle = '#4f9a33'; g.beginPath(); g.moveTo(-14, -2); g.quadraticCurveTo(0, 14, 14, -2); g.quadraticCurveTo(0, 4, -14, -2); g.fill(); ln(g, [[-12, -1], [12, -1]], '#2f6a1f', 1.5); ln(g, [[0, 4], [0, -12]], '#7a5530', 2); g.fillStyle = '#f2e6c8'; g.beginPath(); g.moveTo(1, -12); g.lineTo(9, -4); g.lineTo(1, -3); g.fill(); },
+  cart: g => { g.fillStyle = '#7a5226'; g.fillRect(-12, -9, 24, 14); g.fillStyle = '#946535'; g.fillRect(-12, -9, 24, 4); circ(g, -7, 8, 4.5, '#5f8a35'); circ(g, 7, 8, 4.5, '#5f8a35'); circ(g, -7, 8, 1.5, '#2f5a1f'); circ(g, 7, 8, 1.5, '#2f5a1f'); ln(g, [[12, -2], [16, -8]], '#5a3a1a', 2); },
+  camp: g => { g.fillStyle = '#5c9a30'; g.beginPath(); g.moveTo(-14, 11); g.lineTo(0, -13); g.lineTo(14, 11); g.closePath(); g.fill(); g.fillStyle = '#2a1a0a'; g.beginPath(); g.moveTo(-4, 11); g.lineTo(0, 2); g.lineTo(4, 11); g.fill(); ln(g, [[0, -13], [0, -16]], '#7a5530', 2); ln(g, [[-14, 11], [14, 11]], '#3e7a22', 1.5); },
+  flowerSeed: g => { ICON.seed(g); ln(g, [[2, -6], [4, -13]], '#4f9a33', 2); ell(g, 7, -13, 4, 2.2, -.4, '#6ab845'); circ(g, -6, -10, 3, '#f2a0c0'); },
+  bigMushBed: g => { ICON.mushBed(g); g.fillStyle = '#ffd75a'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.fillText('大', 10, -6); },
+  bigHut: g => { ICON.aphidHut(g); g.fillStyle = '#ffd75a'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.fillText('大', 10, -8); },
+  recipeFeast: g => { g.fillStyle = '#f2e6c8'; g.fillRect(-10, -12, 20, 24); ell(g, 0, -12, 11, 3, 0, '#d8c8a0'); ell(g, 0, 12, 11, 3, 0, '#d8c8a0'); for (let k = 0; k < 4; k++) ln(g, [[-6, -6 + k * 5], [6, -6 + k * 5]], '#8a6a3a', 1); circ(g, 5, 7, 3.5, '#d6303a'); },
+  wheel: g => { g.strokeStyle = '#5a3a1a'; g.lineWidth = 3.5; g.beginPath(); g.arc(0, 0, 11, 0, 7); g.stroke(); for (let k = 0; k < 6; k++) { const a = k / 6 * 6.28; ln(g, [[0, 0], [Math.cos(a) * 10, Math.sin(a) * 10]], '#8a5c32', 2); } circ(g, 0, 0, 3, '#3a2a14'); },
+  saddle: g => { ell(g, 0, 2, 13, 9, 0, '#7a3a1e'); ell(g, -3, 0, 7, 5, 0, '#a85a30'); ell(g, 6, 0, 4, 6, 0, '#5a2a14'); ln(g, [[-12, 6], [12, 6]], '#e2b45c', 1.5); },
+  jaw5: g => { ln(g, [[-4, 10], [-11, -2], [-2, -14]], '#6a7a8a', 5.5); ln(g, [[4, 10], [11, -2], [2, -14]], '#6a7a8a', 5.5); ln(g, [[-4, 10], [-11, -2]], '#c8d8e8', 1.6); ln(g, [[4, 10], [11, -2]], '#c8d8e8', 1.6); },
+  armor4: g => { g.fillStyle = '#5a6a7a'; g.beginPath(); g.moveTo(-12, -11); g.lineTo(12, -11); g.lineTo(10, 12); g.lineTo(-10, 12); g.closePath(); g.fill(); ell(g, -4, -5, 5, 2.5, -.3, '#a8b8c8'); for (const y of [-2, 4]) ln(g, [[-10, y], [10, y]], '#3a4a5a', 1.5); },
+  treasureMap: g => { g.fillStyle = '#e8d8a8'; g.beginPath(); g.moveTo(-13, -10); g.lineTo(-4, -12); g.lineTo(4, -9); g.lineTo(13, -11); g.lineTo(13, 10); g.lineTo(4, 12); g.lineTo(-4, 9); g.lineTo(-13, 11); g.closePath(); g.fill(); ln(g, [[-9, 4], [-3, -2], [3, 3]], 'rgba(120,80,40,.6)', 1.2); ln(g, [[4, -6], [10, 0]], '#d02020', 2.2); ln(g, [[10, -6], [4, 0]], '#d02020', 2.2); },
+  scentBag: g => { ell(g, 0, 5, 10, 8, 0, '#8a5ab8'); g.fillStyle = '#6a3a98'; g.fillRect(-4, -5, 8, 5); for (let k = 0; k < 3; k++) ln(g, [[-6 + k * 6, -8], [-4 + k * 6, -14]], 'rgba(200,160,255,.8)', 1.5); },
+  wings: g => { g.globalAlpha = .85; ell(g, -7, -2, 9, 4.5, -.6, '#e8f0ff'); ell(g, 7, -2, 9, 4.5, .6, '#e8f0ff'); ell(g, -6, 6, 7, 3.5, .5, '#d8e4f8'); ell(g, 6, 6, 7, 3.5, -.5, '#d8e4f8'); g.globalAlpha = 1; ln(g, [[-12, -6], [-2, 1]], '#9ab', 1); ln(g, [[12, -6], [2, 1]], '#9ab', 1); },
+  hatChef: g => { g.fillStyle = '#f4f2ea'; g.fillRect(-8, 2, 16, 8); circ(g, -5, -3, 6, '#fff'); circ(g, 5, -3, 6, '#fff'); circ(g, 0, -7, 6.5, '#fff'); ln(g, [[-8, 6], [8, 6]], '#d8d4c8', 1.5); },
+  hatHelmet: g => { g.fillStyle = '#4a4a56'; g.beginPath(); g.arc(0, 4, 12, Math.PI, 0); g.fill(); g.fillRect(-14, 3, 28, 4); ell(g, -4, -2, 4, 2.5, -.4, '#9a9aa8'); ln(g, [[0, -8], [0, 3]], '#2a2a32', 2); },
+  hatCrown: g => { g.fillStyle = '#ffd75a'; g.beginPath(); g.moveTo(-12, 9); g.lineTo(-12, -4); g.lineTo(-6, 2); g.lineTo(0, -8); g.lineTo(6, 2); g.lineTo(12, -4); g.lineTo(12, 9); g.closePath(); g.fill(); circ(g, 0, 3, 2.5, '#d6303a'); ell(g, 8, -10, 7, 2.5, -.6, '#e88ab8'); },
+  dyeLeaf: dyeBag('#4f9a33'), dyeBlack: dyeBag('#2e2e38'), dyeGold: dyeBag('#d8a83a'), dyeStripe: dyeBag(null, 1), dyeSpot: dyeBag(null, 2),
+  nectarFlower: g => { ln(g, [[0, 12], [0, 0]], '#4f8a2b', 2.5); ell(g, -5, 7, 5, 2.5, -.5, '#5c9a30'); for (let k = 0; k < 6; k++) { const a = k / 6 * 6.28; ell(g, Math.cos(a) * 6, -4 + Math.sin(a) * 6, 5.5, 3.5, a, '#f2a0c0'); } circ(g, 0, -4, 3.5, '#ffd75a'); },
+});
+function drawObj9(o, tx, ty, x, y) {
+  const T = D.T;
+  if (o.t === 'road' || o.t === 'pave') {
+    const X = tx * T, Y = ty * T;
+    if (o.t === 'road') { ctx.fillStyle = '#8a6a42'; ctx.fillRect(X, Y, T, T); for (let k = 0; k < 5; k++) circ(ctx, X + hash(tx, k) * T, Y + hash(k, ty) * T, 1.2 + hash(k, k) * 1.5, 'rgba(70,45,20,.5)'); }
+    else { ctx.fillStyle = '#6a6660'; ctx.fillRect(X, Y, T, T); for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) { ctx.fillStyle = (r + c + tx + ty) % 2 ? '#a8a49a' : '#949088'; ctx.fillRect(X + 1 + c * 16, Y + 1 + r * 16, 14, 14); } }
+    return true;
+  }
+  if (o.t === 'bridge') {
+    let ang = 0;
+    if (river) { const m = waterMapC(), k = ty * D.SW + tx, i = m && m.seg[k]; if (i >= 0 && river.pts[i + 1]) ang = Math.atan2(river.pts[i + 1].y - river.pts[i].y, river.pts[i + 1].x - river.pts[i].x); }
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(-17, -15, 36, 32);
+    for (let k = 0; k < 5; k++) { ctx.fillStyle = k % 2 ? '#a87a48' : '#946535'; ctx.fillRect(-16, -16 + k * 6.4, 32, 5.6); }
+    ctx.restore();
+    return true;
+  }
+  if (o.t === 'nectarFlower') {
+    drawIcon(ctx, 'nectarFlower', x, y, 34);
+    const n = o.d ? o.d[0] : 0; if (n) { circ(ctx, x + 11, y - 12, 7, 'rgba(0,0,0,.55)'); ctx.fillStyle = '#ffe08a'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(n, x + 11, y - 9); }
+    return true;
+  }
+  if (o.t === 'camp') {
+    ell(ctx, x + 3, y + 8, 22, 10, 0, 'rgba(0,0,0,.3)');
+    ctx.fillStyle = '#4f8a2a'; ctx.beginPath(); ctx.moveTo(x - 22, y + 14); ctx.lineTo(x, y - 20); ctx.lineTo(x + 22, y + 14); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#6ab845'; ctx.beginPath(); ctx.moveTo(x - 14, y + 14); ctx.lineTo(x, y - 14); ctx.lineTo(x + 2, y + 14); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#1a1008'; ctx.beginPath(); ctx.moveTo(x - 5, y + 14); ctx.lineTo(x, y + 2); ctx.lineTo(x + 5, y + 14); ctx.fill();
+    circ(ctx, x + 16, y + 14, 3 + Math.sin(TT * 8) * .6, 'rgba(255,170,60,.8)');
+    nameTag('⛺ キャンプ', x, y - 24, '#ffe9a8');
+    return true;
+  }
+  if (o.t === 'treasure') {
+    ell(ctx, x, y + 4, 16, 10, 0, '#5a4026'); ell(ctx, x, y + 1, 13, 8, 0, '#7a5a34');
+    ln(ctx, [[x - 6, y - 6], [x + 6, y + 6]], '#d02020', 3); ln(ctx, [[x + 6, y - 6], [x - 6, y + 6]], '#d02020', 3);
+    if ((TT * 2) % 2 < .3) { ctx.fillStyle = '#fff6c8'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✦', x + 10, y - 8); }
+    const max = D.OBJ.treasure.hp; if (o.hp < max) bar(x - 12, y - 19, 24, 3, o.hp / max, '#e2a35c');
+    return true;
+  }
+  return false;
+}
+Object.assign(ITEM_INFO, {
+  nectar: ['花畑で集まる甘い蜜。蜜パンの材料', '花畑・蜜の花'], honeyBread: ['腹持ちがよく、HPも回復', '調理台'], feast: ['大ごちそう。すべての力が一度に上がる', '調理台（ごちそうのレシピが必要）'],
+  road: ['地上に敷くと歩くのも荷車も1.3倍速くなる', 'クラフト'], pave: ['地上に敷くと1.6倍速くなる丈夫な道', 'クロアリの国のメダル交換所'],
+  bridge: ['川や池の水の上に置ける足場。並べると渡れる', 'クラフト'], leafBoat: ['持っていると水に入ったとき自動で乗る。流されにくく溺れない', 'クラフト'],
+  cart: ['荷物を12個入れて運べる。仲間と引く・ダンゴムシにつなぐと速い', '作業台'], camp: ['置くと復活地点になる。荷物置き場・日陰にもなる', '作業台'],
+  flowerSeed: ['地上に植えると毎朝「花の蜜」がたまる', 'ハキリアリの国のメダル交換所'], bigMushBed: ['2倍とれるキノコ床', 'ハキリアリの国のメダル交換所'], bigHut: ['6匹住めるアブラムシ小屋', 'ハキリアリの国のメダル交換所'],
+  recipeFeast: ['使うと「宴のごちそう」が作れるようになる（ワールド全員）', 'ハキリアリの国のメダル交換所'],
+  wheel: ['荷車に使うと速くなり、荷物も20個入る', 'クロアリの国のメダル交換所'], saddle: ['仲良しのダンゴムシに使うと、2人で乗れる', 'クロアリの国のメダル交換所'],
+  jaw5: ['とても強い鋼の大あご', 'クロアリの国のメダル交換所'], armor4: ['とても丈夫な鋼のよろい', 'クロアリの国のメダル交換所'],
+  treasureMap: ['使うと遠くのどこかに宝が埋まる。地図に✕が出る', 'ハネアリの国のメダル交換所'], scentBag: ['スズメバチに狙われなくなる', 'ハネアリの国のメダル交換所'],
+  wings: ['水の上を飛んで渡れる。アリジゴクにも捕まらない', 'ハネアリの国のメダル交換所'],
+  hatChef: ['見た目の帽子（装備欄の帽子）', 'ハキリアリの国のメダル交換所'], hatHelmet: ['見た目の帽子', 'クロアリの国のメダル交換所'], hatCrown: ['見た目の帽子', 'ハネアリの国のメダル交換所'],
+  dyeLeaf: ['使うと体の色が若葉色に（もう一度で元に戻る）', 'ハキリアリの国のメダル交換所'], dyeBlack: ['使うと体の色が黒鉄色に', 'クロアリの国のメダル交換所'], dyeGold: ['使うと体の色が金色に', 'ハネアリの国のメダル交換所'],
+  dyeStripe: ['使うとしま模様に（もう一度で元に戻る）', 'ハネアリの国のメダル交換所'], dyeSpot: ['使うと水玉模様に', 'ハネアリの国のメダル交換所'],
+});
+
 function itemKind(def) {
+  if (def.hat) return '見た目（帽子）';
+  if (def.tool === 'dye') return '見た目（染め粉）';
   return def.cooked ? '料理' : def.food ? '食べ物' : def.jaw ? '装備（大あご）' : def.armor ? '装備（よろい）' : def.acc ? 'アクセサリ' : def.tool ? '道具' : def.place ? '置く物' : def.money ? 'お金' : '素材';
 }
 function itemInfo(id) {                       // [名前, 種類, 説明, 性能, 入手, 使い道]
@@ -2049,6 +2545,11 @@ function surfMap(mx, my, mw, mh, cx, cy, s, big) {   // cx,cy：地図の真ん�
   for (const t of trees) circ(ctx, X(t.x), Y(t.y), Math.max(4, (t.r + 300) * s), 'rgba(30,60,20,.45)');
   ctx.fillStyle = '#8a8478'; for (const o of rocks) { if (o.k) continue; const px = X(o.x), py = Y(o.y); if (px < mx - 10 || py < my - 10 || px > mx + mw + 10 || py > my + mh + 10) continue; ctx.beginPath(); ctx.arc(px, py, R(o.r), 0, 7); ctx.fill(); }
   for (const t of trees) circ(ctx, X(t.x), Y(t.y), Math.max(2.5, t.r * s), '#3a2a16');
+  for (const m of meadows) circ(ctx, X(m.x), Y(m.y), R(m.r), 'rgba(170,210,110,.3)');
+  for (const q of ponds) circ(ctx, X(q.x), Y(q.y), R(q.r), '#3f73a0');
+  if (river) { ctx.strokeStyle = '#3f73a0'; ctx.lineWidth = Math.max(2, river.hw * 2 * s); ctx.lineJoin = 'round'; ctx.beginPath(); river.pts.forEach((p, i) => i ? ctx.lineTo(X(p.x), Y(p.y)) : ctx.moveTo(X(p.x), Y(p.y))); ctx.stroke(); }
+  for (const g of logs) ln(ctx, [[X(g.x1), Y(g.y1)], [X(g.x2), Y(g.y2)]], '#7a5226', Math.max(2, g.r * 1.6 * s));
+  for (const [i, o] of objs.s) if (o.t === 'bridge' || o.t === 'road' || o.t === 'pave') { ctx.fillStyle = o.t === 'bridge' ? '#c89a5a' : o.t === 'pave' ? '#aaa' : '#a07a4a'; ctx.fillRect(X((i % D.SW) * D.T), Y((i / D.SW | 0) * D.T), Math.max(1.5, D.T * s), Math.max(1.5, D.T * s)); }
   if (big) for (const q of puddles) circ(ctx, X(q.x), Y(q.y), R(q.r * .9), 'rgba(70,110,150,.35)');
   if (big) for (const q of sand) circ(ctx, X(q.x), Y(q.y), R(q.r), 'rgba(214,192,140,.3)');
   ctx.strokeStyle = 'rgba(255,255,255,.12)';
@@ -2067,6 +2568,10 @@ function surfMap(mx, my, mw, mh, cx, cy, s, big) {   // cx,cy：地図の真ん�
     ctx.drawImage(fogCv, X(0), Y(0), D.SW * D.T * s, D.SH * D.T * s);
   }
   circ(ctx, X(D.NEST.x), Y(D.NEST.y), big ? 6 : 4, '#f5d48a');
+  if (D.KINGDOMS) for (const k of KL) { const g = D.KINGDOMS[k].gate; circ(ctx, X(g.x), Y(g.y), big ? 7 : 4, KCOL[k][0]); ctx.fillStyle = '#fff'; ctx.font = big ? 'bold 12px sans-serif' : '9px sans-serif'; ctx.textAlign = k === 'k1' ? 'left' : k === 'k2' ? 'right' : 'center'; ctx.fillText(big ? `🚩${D.KINGDOMS[k].n}` : D.KINGDOMS[k].short, X(g.x) + (k === 'k1' ? 8 : k === 'k2' ? -8 : 0), Y(g.y) + (k === 'k3' ? 16 : 4)); }
+  for (const t of treasures) { const tx = X(t.x), ty = Y(t.y); ln(ctx, [[tx - 5, ty - 5], [tx + 5, ty + 5]], '#ff4040', 2.5); ln(ctx, [[tx + 5, ty - 5], [tx - 5, ty + 5]], '#ff4040', 2.5); if (big) { ctx.fillStyle = '#ffd0d0'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('宝', tx, ty - 8); } }
+  for (const id in RCA) { ctx.fillStyle = '#e2b45c'; ctx.fillRect(X(RCA[id].x) - 2, Y(RCA[id].y) - 2, 4, 4); }
+  if (envoy) circ(ctx, X(envoy[1]), Y(envoy[2]), big ? 4 : 3, KCOL[KL[envoy[0]]][0]);
   if (townPos) { circ(ctx, X(townPos.x), Y(townPos.y), big ? 5 : 4, '#e8603a'); ctx.fillStyle = '#ffd'; ctx.font = big ? '12px sans-serif' : '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('商店街', X(townPos.x), Y(townPos.y) - 7); }
   if (big) { ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('巣', X(D.NEST.x), Y(D.NEST.y) - 9); }
   for (const [i, o] of objs.s) if (o.t === 'flag') { const fx = X((i % D.SW + .5) * D.T), fy = Y(((i / D.SW | 0) + .5) * D.T); ln(ctx, [[fx, fy + 3], [fx, fy - 5]], '#fff', 1); ctx.fillStyle = '#ff7ac0'; ctx.fillRect(fx, fy - 5, 4, 3); }
@@ -2088,9 +2593,9 @@ function drawBigMap() {                       // Mキー：大きい地図
 // ---- 仲間の位置（矢印・ほかの階） ----
 const LAYER_NAME = { s: '地上', u: '巣の中', u2: '地下2階', u3: '地下3階', t: 'アリ商店街' };
 function drawFriends(ms, QY) {
-  if (!ms || ms[9]) return;
+  if (!ms || ms[9]) return 160 + QY;
   const list = Object.values(RP);
-  if (!list.length) return;
+  if (!list.length) return 160 + QY;
   for (const p of list) {                                                         // 同じ階：画面の外なら矢印
     if (p.d[9] || LAYERS[p.d[3]] !== me.l || lostNow()) continue;
     arrow(p.x, p.y, p.d[1], p.d[2]);
@@ -2099,7 +2604,7 @@ function drawFriends(ms, QY) {
   ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
   const rows = list.map(p => {
     const l = LAYERS[p.d[3]], same = l === me.l;
-    const where = p.d[9] ? '💀 復活待ち' : same ? (me.l === 't' ? 'アリ商店街' : `${LAYER_NAME[l]}　${Math.round(Math.hypot(p.x - me.x, p.y - me.y) / D.T)}m`) : `${LAYER_NAME[l]}にいる`;
+    const where = p.d[9] ? '💀 復活待ち' : same ? (isTownL(me.l) ? LAYER_NAME[me.l] : `${LAYER_NAME[l]}　${Math.round(Math.hypot(p.x - me.x, p.y - me.y) / D.T)}m`) : `${LAYER_NAME[l]}にいる`;
     return [p.d[2], p.d[1], where, same];
   });
   const W = Math.max(150, ...rows.map(r => ctx.measureText(r[1] + '　' + r[2]).width + 34));
@@ -2112,8 +2617,9 @@ function drawFriends(ms, QY) {
     const nw = ctx.measureText(n).width;
     ctx.font = '11px sans-serif'; ctx.fillStyle = same ? '#bfe3a8' : '#f0c890'; ctx.fillText('　' + where, 32 + nw, yy);
   });
+  return y + 26 + rows.length * 17;
 }
-let nestByCompass = false;
+let nestByCompass = false, tipNow = '';
 function drawHUD(dt, ms) {
   nestByCompass = false;
   const [day, time, night, rain] = st ? st.c : [1, 0, 0, 0];
@@ -2160,7 +2666,8 @@ function drawHUD(dt, ms) {
       ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('🕷 巨大グモ', VW / 2, 84);
     }
   }
-  drawFriends(ms, QY);
+  drawOrders(drawFriends(ms, QY), ms);
+  orderArrow(ms);
   if (me.l === 's' && ms && !ms[9] && !nestByCompass && !lostNow()) arrow(D.NEST.x, D.NEST.y, nearFlag() && Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) > D.ZONE_R[1] * D.T ? '巣（旗の匂い）' : '巣', 'rgba(255,220,120,.85)');
   drawDangerHUD(ms);
   if (ms && ms[17]) { ctx.fillStyle = 'rgba(230,230,240,.12)'; ctx.fillRect(0, 0, VW, VH); ctx.fillStyle = '#eef'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('クモの糸で動きが鈍い！', VW / 2, VH / 2 + 60); }
@@ -2172,7 +2679,7 @@ function drawHUD(dt, ms) {
   const total = night ? D.NIGHT_LEN : D.DAY_LEN, remain = Math.max(0, Math.ceil(total - time));
   ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(VW / 2 - 130, 10, 260, 50);
   ctx.font = 'bold 20px sans-serif'; ctx.fillStyle = night ? '#a9b8ff' : '#ffe08a';
-  ctx.fillText(`${night ? '🌙' : rain ? '☔' : '☀'} ${day}日目　${{ s: '地上', u: '巣の中', u2: '地下2階', u3: '地下3階', t: 'アリ商店街' }[me.l]}`, VW / 2, 34);
+  ctx.fillText(`${night ? '🌙' : rain ? '☔' : '☀'} ${day}日目　${LAYER_NAME[me.l]}`, VW / 2, 34);
   ctx.font = '12px sans-serif'; ctx.fillStyle = '#ccc';
   ctx.fillText(night ? `夜明けまで ${remain}秒` : `日没まで ${remain}秒`, VW / 2, 52);
   // 右上：ミニマップ
@@ -2189,10 +2696,10 @@ function drawHUD(dt, ms) {
     const pt = (x, y, c, r) => circ(ctx, mx + mw / 2 + (x / D.T - cx) * sc, my + mh / 2 + (y / D.T - cy) * sc, r, c);
     for (const id in RP) if (LAYERS[RP[id].d[3]] === me.l && !RP[id].d[9]) pt(RP[id].x, RP[id].y, RP[id].d[2], 2.5);
     pt(me.x, me.y, '#fff', 3);
-  } else if (me.l === 't') {
-    const sc = Math.min(mw / D.TW, mh / D.TH), ox = mx + (mw - D.TW * sc) / 2, oy = my + (mh - D.TH * sc) / 2;
-    for (let i = 0; i < town.length; i++) { const v = town[i]; ctx.fillStyle = v === 0 ? '#b08a5a' : v === 7 ? '#ffe08a' : '#3a2616'; ctx.fillRect(ox + (i % D.TW) * sc, oy + (i / D.TW | 0) * sc, sc + .5, sc + .5); }
-    for (const [i, o] of objs.t) if (o.t.startsWith('npc') || o.t === 'gachaMachine' || o.t === 'board') circ(ctx, ox + (i % D.TW + .5) * sc, oy + ((i / D.TW | 0) + .5) * sc, 3, '#e86a9a');
+  } else if (isTownL(me.l)) {
+    const sc = Math.min(mw / D.TW, mh / D.TH), ox = mx + (mw - D.TW * sc) / 2, oy = my + (mh - D.TH * sc) / 2, tg = gridOf(me.l);
+    for (let i = 0; i < tg.length; i++) { const v = tg[i]; ctx.fillStyle = v === 0 ? '#b08a5a' : v === 7 ? '#ffe08a' : '#3a2616'; ctx.fillRect(ox + (i % D.TW) * sc, oy + (i / D.TW | 0) * sc, sc + .5, sc + .5); }
+    for (const [i, o] of objs[me.l]) if (o.t.startsWith('npc') || o.t === 'gachaMachine' || o.t === 'board') circ(ctx, ox + (i % D.TW + .5) * sc, oy + ((i / D.TW | 0) + .5) * sc, 3, '#e86a9a');
     circ(ctx, ox + me.x / D.T * sc, oy + me.y / D.T * sc, 3, '#fff');
   } else {
     const s = mw / (D.SW * D.T) * 2.2, half = (D.SW * D.T);   // 地図が広いので、自分のまわりを大きめに表示
@@ -2229,22 +2736,33 @@ function drawHUD(dt, ms) {
   let tip = '';
   if (ms && !ms[9] && !ms[19]) {
     const R = touchMode ? 'タップ' : '右クリック/E', H = touchMode ? '長押し' : '左クリック長押し/K', F = touchMode ? '「入る/地上へ」' : 'F';
-    if (canEnter()) tip = me.l === 's' ? (Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30 ? `${F}：巣に入る` : `${F}：アリ商店街に入る`) : me.l === 't' ? `${F}：地上に出る` : ({ down: `${F}：下の階へ降りる`, up: `${F}：上の階へ上がる`, out: `${F}：地上に出る` }[(nearExit() || {}).kind] || `${F}：地上に出る`);
+    if (canEnter()) tip = me.l === 's' ? (Math.hypot(me.x - D.NEST.x, me.y - D.NEST.y) < D.NEST.r + 30 ? `${F}：巣に入る` : gateNear() ? `${F}：${D.KINGDOMS[gateNear()].n}に入る` : `${F}：アリ商店街に入る`) : isTownL(me.l) ? `${F}：地上に出る` : ({ down: `${F}：下の階へ降りる`, up: `${F}：上の階へ上がる`, out: `${F}：地上に出る` }[(nearExit() || {}).kind] || `${F}：地上に出る`);
     if (!tip && me.l === 's') {
       for (const q of pits) { const d = Math.hypot(q.x - me.x, q.y - me.y); if (d < q.r + 50 && (d < 130 || hasAccC('sensor'))) { tip = '⚠ すり鉢状の砂地…アリジゴクだ！ 真ん中に近づくな'; break; } }
-      if (!tip && wetC() > .1 && inPuddleC(me.x, me.y) && !hasAccC('floater')) tip = '⚠ 水たまりで溺れる！ 早く出ろ（草の浮き輪があれば平気）';
+      if (!tip && wetC() > .1 && inPuddleC(me.x, me.y) && !hasAccC('floater') && !hasAccC('wings')) tip = '⚠ 水たまりで溺れる！ 早く出ろ（草の浮き輪があれば平気）';
+      const wq = !ms[30] && inWaterC(me.x, me.y);
+      if (!tip && wq && !hasAccC('wings')) tip = inv.some(q => q && q.id === 'leafBoat') ? '🍃 葉っぱのボートで浮いている（流されにくい）' : hasAccC('floater') ? '🛟 浮き輪で浮いている（溺れない）' : `⚠ ${wq.kind === 'river' ? '川に流される！' : '池で'}溺れる前に岸へ！（小枝の橋・葉っぱのボートがあると安全）`;
+      if (!tip && inLogC(me.x, me.y)) tip = '🪵 丸太のトンネルの中（鳥から隠れられる・日陰）';
     }
+    if (!tip && tipNow) tip = tipNow;
     if (!tip && isUnder(me.l) && ddTouch) tip = 'もう一度「下へ掘る」で止める';
     const c = nearCube();
     if (ms[18]) tip = `後ろ向きに引っぱり中…（巣・商店街の入口・おびき台へ）　${touchMode ? 'もう一度タップ' : 'E'}：離す`;
     else if (c) tip = `${touchMode ? 'タップ' : 'E'}：角砂糖をつかんで引っぱる（仲間と引くと速い）`;
     const a = aim(), o = objs[me.l].get(Math.floor(a.y / D.T) * LW(me.l) + Math.floor(a.x / D.T));
-    const crn = nearCritter();
-    if (!tip && ms[24]) tip = `${touchMode ? '「降りる」' : 'E'}：ダンゴムシから降りる`;
+    const crn = nearCritter(), ft = frontT;
+    if (!tip && ms[28]) tip = `🛒 荷車を引っぱっている　${touchMode ? 'タップ' : 'E'}：離す`;
+    if (!tip && ft && ft.kind === 'cart') tip = ms[24] ? `${touchMode ? '「長押しで降りる」を短く' : 'E'}：ダンゴムシに荷車をつなぐ／はずす` : `${touchMode ? 'タップ' : 'E'}：荷車を開く（荷物の出し入れ・引っぱる）`;
+    if (!tip && ft && ft.kind === 'envoy') tip = `${touchMode ? 'タップ' : 'E'}：使者と話す（特別な注文）`;
+    if (!tip && ft && ft.kind === 'critter' && ft.seat) tip = `${touchMode ? 'タップ' : 'E'}：鞍のうしろに乗せてもらう`;
+    if (!tip && ms[30]) tip = `🐾 鞍のうしろに乗っている　${touchMode ? '「長押しで降りる」' : 'E 長押し'}：降りる`;
+    if (!tip && ms[24]) tip = mouse.l && !(frontT) ? 'ダンゴムシの上からは掘れない（攻撃はできる）' : `${touchMode ? '「長押しで降りる」' : 'E 長押し'}：降りる　${touchMode ? '「食べる」' : 'E'}：食べる`;
     else if (!tip && crn) { const cd = crn.c.d; tip = cd[1] === 0 ? (cd[6] & 1 ? `${touchMode ? 'タップ' : 'E'}：アブラムシをその場で待たせる` : `${touchMode ? 'タップ' : 'E'}：アブラムシを連れて行く（巣の小屋まで）`) : cd[6] & 2 ? `${touchMode ? 'タップ' : 'E'}：ダンゴムシに乗る` : (inv[sel] && inv[sel].id === 'leaf' ? `${touchMode ? 'タップ' : 'E'}：ダンゴムシに葉っぱをあげる` : '葉っぱを持ってEであげると仲良くなれそう'); }
     const TIPS = { stove: `${R}：料理する`, aphidHut: `${R}：甘露をとる・草を入れる`, mushBed: `${R}：キノコをとる・葉っぱを入れる`, chest: `${R}：チェストを開く`, bench: `${R}：作業台でクラフト`, bed: `${R}：${night ? '眠る' : '復活地点にする（夜は眠れる）'}`, branch: `${H}：枝をかじって小枝を集める`, bigLeaf: `${H}：落ち葉をちぎって葉っぱを集める`, husk: `${H}：虫の亡骸から甲殻を取る`, clue: `${R}：調べる`, clue3: `${R}：調べる`, cocoon: `${H}：繭をかじって破る`, queenCocoon: `${H}：繭をかじって破る`, npcShop: `${R}：話す`, shelf: `${R}：話す`, gachaMachine: `${R}：ガチャを回す`, npcGacha: `${R}：話す`, betTable: `${R}：かけをする`, npcBet: `${R}：話す`, board: `${R}：読む` };
-    if (o && Math.hypot(a.x - me.x, a.y - me.y) < D.REACH && TIPS[o.t]) tip = TIPS[o.t];
-    if (!tip && me.l === 't') tip = `お店の前で ${touchMode ? '「つかむ/話す」' : 'E'}：話す`;
+    Object.assign(TIPS, { nectarFlower: `${R}：花の蜜をとる`, camp: `${R}：中継キャンプ（復活地点・荷物置き場）`, orderBoard: `${R}：注文を見る`, npcTrade: `${R}：注文の品を納品する`, tradeDesk: `${R}：注文の品を納品する`, npcMedal: `${R}：メダルと交換する`, medalShelf: `${R}：メダルと交換する`, npcKing: `${R}：王と話す`, throne: `${R}：王と話す`, npcCitizen: `${R}：話す`, treasure: `${H}：宝を掘り出す！` });
+    if (ft && ft.kind === 'obj' && TIPS[ft.o.t]) tip = TIPS[ft.o.t];
+    else if (o && !INTERACT[o.t] && Math.hypot(a.x - me.x, a.y - me.y) < D.REACH && TIPS[o.t]) tip = TIPS[o.t];
+    if (!tip && isTownL(me.l)) tip = `お店の前で ${touchMode ? '「つかむ/話す」' : 'E'}：話す`;
     if (isUnder(me.l) && cracks.size) for (const [key] of cracks) { const [cl, cis] = key.split(':'); if (cl !== me.l) continue; const i = +cis, tx = i % D.UW, ty = (i / D.UW) | 0; if (Math.hypot((tx + .5) * D.T - me.x, (ty + .5) * D.T - me.y) < 260) { tip = '⚠ 天井が崩れそう！ まわりごと崩れるぞ。柱を置くか離れろ！'; break; } }
   }
   if (tip) {
@@ -2256,8 +2774,11 @@ function drawHUD(dt, ms) {
     ctx.textAlign = 'left'; ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,.45)';
     ctx.fillText(`Tab 持ち物　C クラフト　J 手帳　E 調べる/話す/つかむ/使う　K 掘る/攻撃　O 置く　F 出入り　Q 捨てる　M 地図${isUnder(me.l) && me.l !== 'u3' ? '　X(長押し) 下へ掘る' : ''}　Space もがく`, 12, VH - 12);
   }
+  tipNow = '';
   drawBigMap();
   if (touchMode) drawTouchUI();
+  holdRing();
+  drawDelivered(dt);
   if (ms && ms[16]) {                                                             // 睡眠
     ctx.fillStyle = st.c[4] ? 'rgba(10,15,40,.45)' : 'rgba(10,15,40,.25)'; ctx.fillRect(0, 0, VW, VH);
     ctx.textAlign = 'center'; ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = '#c8d4ff';
@@ -2327,18 +2848,22 @@ function invSections(kind) {
   return `<div class="sec-h">🖐 ホットバー <small>手に持つもの（1〜8キー）。食べ物・置く物はここ</small></div><div class="grid hotrow">${hot}</div>
     <div class="sec-h">🎒 バッグ <small>素材などをしまっておく場所</small></div><div class="grid bagrow">${bag}</div>`;
 }
-const PANEL_TITLE = { inv: '持ち物・装備', craft: 'クラフト', chest: 'チェスト', journal: '📖 女王救出の手帳', shop: '🏪 道具屋（ハチミツばあさん）', gacha: '🎰 ガチャ屋（ガチャじい）', bet: '🌰 かけ屋（どんぐり師）', board: '📋 けいじばん' };
+const PANEL_TITLE = { inv: '持ち物・装備', craft: 'クラフト', chest: 'チェスト', orders: '📋 注文ボード', journal: '📖 女王救出の手帳', shop: '🏪 道具屋（ハチミツばあさん）', gacha: '🎰 ガチャ屋（ガチャじい）', bet: '🌰 かけ屋（どんぐり師）', board: '📋 けいじばん' };
 function renderPanel() {
   if (!panel || !D) return;
   const body = $('pbody'), honey = cnt('honey');
   let title = PANEL_TITLE[panel], hint = '', h = '';
-  if (panel === 'inv') {
+  if (['orders', 'trade', 'medal', 'king', 'citizen', 'envoy'].includes(panel)) {
+    if (panel !== 'orders' && !npc) return;
+    [title, h, hint] = tradePanelHTML();
+  } else if (panel === 'inv') {
     const jl = equip.jaw ? D.ITEMS[equip.jaw.id].jaw : 1, J = D.JAW[jl], ar = equip.armor ? D.ITEMS[equip.armor.id].armor : 0;
-    const hs = held >= 0 && inv[held], canEq = hs && (D.ITEMS[hs.id].jaw || D.ITEMS[hs.id].armor || D.ITEMS[hs.id].acc);
+    const hs = held >= 0 && inv[held], canEq = hs && (D.ITEMS[hs.id].jaw || D.ITEMS[hs.id].armor || D.ITEMS[hs.id].acc || D.ITEMS[hs.id].hat);
     h = `<div class="invwrap"><div class="eqbox"><h3 style="margin-top:0">装備</h3>
       <div class="eqrow">${slotHTML(equip.jaw, 'data-k="eq" data-e="jaw"', 'eq')}<div>大あご<br><b>${equip.jaw ? D.ITEMS[equip.jaw.id].n : 'ふつうの大あご'}</b></div></div>
       <div class="eqrow">${slotHTML(equip.armor, 'data-k="eq" data-e="armor"', 'eq')}<div>よろい<br><b>${equip.armor ? D.ITEMS[equip.armor.id].n : 'なし'}</b></div></div>
       ${['acc1', 'acc2'].map((k, n) => `<div class="eqrow">${slotHTML(equip[k], `data-k="eq" data-e="${k}"`, 'eq')}<div>アクセサリ${n + 1}<br><b>${equip[k] ? D.ITEMS[equip[k].id].n : 'なし'}</b>${equip[k] ? `<br><small style="color:#b8d8a0">${D.ACC_INFO[equip[k].id] || ''}</small>` : ''}</div></div>`).join('')}
+      <div class="eqrow">${slotHTML(equip.hat, 'data-k="eq" data-e="hat"', 'eq')}<div>帽子（見た目）<br><b>${equip.hat ? D.ITEMS[equip.hat.id].n : 'なし'}</b></div></div>
       <div class="stats">掘る速さ　${J.dig}<br>攻撃力　　${J.atk}<br>防御　　　${Math.round(ar * 100)}%<br>🍯 ミツ玉　${honey}</div></div>
       <div>${invSections('inv')}
       <div class="btns">${canEq ? '<button id="equipBtn" style="background:#3a7a3a;color:#fff">装備する</button>' : ''}${held >= 0 ? `<button id="moveBtn" style="background:#4b3a24;color:#f0d9a8">${held < D.HOTBAR ? 'バッグへしまう' : 'ホットバーへ出す'}</button><button id="dropBtn">捨てる</button>` : ''}</div></div></div>`;
@@ -2356,22 +2881,27 @@ function renderPanel() {
       return `<div class="rc" data-info="${r.out}"><img src="${iconURL(r.out)}"><div class="nm">${D.ITEMS[r.out].n}${r.n > 1 ? ' ×' + r.n : ''}</div><div class="cost">${cost}</div><button class="pin ${pins.includes(r.out) ? 'on' : ''}" data-pin="${r.out}" title="ピン留め">📌</button><button data-craft="${ri}" ${ok ? '' : 'disabled'}>作る</button></div>`;
     };
     const nearSt = nearObjC('stove');
+    const lockU = r => r.unlock && !(trade && trade.unlocks[r.unlock]);
     const hand = D.RECIPES.map((r, i) => r.bench || r.cook ? '' : row(r, i, false)).join('');
     const bench = D.RECIPES.map((r, i) => r.bench ? row(r, i, !near) : '').join('');
-    const cook = D.RECIPES.map((r, i) => r.cook ? row(r, i, !nearSt) : '').join('');
+    const cook = D.RECIPES.map((r, i) => r.cook ? row(r, i, !nearSt || lockU(r)).replace('<div class="cost">', lockU(r) ? '<div class="cost"><span class="ng">🔒 レシピが必要（ハキリアリの国）</span>' : '<div class="cost">') : '').join('');
     h = `<div class="recipes"><div class="grp">✋ 手でつくる</div>${hand}
       <div class="grp">🔨 作業台でつくる <small>${near ? '作業台の近くにいる ✓' : '🔒 作業台の近くで使える'}</small></div><div class="${near ? '' : 'dim'}">${bench}</div>
       <div class="grp cook">🍳 調理台で料理 <small>${nearSt ? '調理台の近くにいる ✓' : '🔒 調理台（小石4・小枝3・土2）の近くで使える'}</small></div><div class="${nearSt ? '' : 'dim'}">${cook}</div></div>`;
     hint = '📌 でピン留めすると、材料の集まり具合が画面右に表示される。大あご・よろいは作ると自動で装備';
   } else if (panel === 'chest' && chest) {
     let g = '<div class="grid">';
-    for (let i = 0; i < D.CHEST_SIZE; i++) g += slotHTML(chest.items[i], `data-k="chest" data-i="${i}"`);
+    const isCart = chest.l === 'cart';
+    if (isCart) title = `🛒 荷車${chest.cart && chest.cart.wheel ? '（車輪つき）' : ''}`; else if (chest.camp) title = '⛺ 中継キャンプ';
+    for (let i = 0; i < chest.items.length; i++) g += slotHTML(chest.items[i], `data-k="chest" data-i="${i}"`);
     let hot = '', bag = '';
     for (let i = 0; i < D.HOTBAR; i++) hot += slotHTML(inv[i], `data-k="cinv" data-i="${i}"`, i === sel ? 'sel' : '', i + 1);
     for (let i = D.HOTBAR; i < D.INV_SIZE; i++) bag += slotHTML(inv[i], `data-k="cinv" data-i="${i}"`);
-    h = '<div class="clab">📦 チェストの中</div>' + g + '</div><div class="cdiv"><span>▲ チェスト　　▼ 自分の持ち物</span></div>'
+    const nm = isCart ? '荷車' : chest.camp ? 'キャンプ' : 'チェスト';
+    h = (isCart ? `<div class="btns" style="margin:0 0 6px"><button class="btnx go" id="cartPull" ${chest.cart && chest.cart.hitch ? 'disabled' : ''}>🛒 引っぱる</button><button class="btnx" id="cartPick">たたんで持つ（空のとき）</button></div>` : '')
+      + `<div class="clab">${isCart ? '🛒' : chest.camp ? '⛺' : '📦'} ${nm}の中</div>` + g + `</div><div class="cdiv"><span>▲ ${nm}　　▼ 自分の持ち物</span></div>`
       + `<div class="grid bagrow">${bag}</div><div class="hotsep"></div><div class="grid hotrow">${hot}</div>`;
-    hint = 'クリックでチェスト ⇄ 持ち物 に移動（仲間と共有）';
+    hint = isCart ? '荷車の中身は、国の門の近くに止めておけば納品に使える。ダンゴムシに乗ってEでつなげる' : `クリックで${nm} ⇄ 持ち物 に移動（仲間と共有）`;
   } else if (panel === 'journal') {
     h = `<div class="recipes">${journalHTML()}</div>`;
     hint = '目標の場所はピンクの矢印「女王の匂い」が教えてくれる';
@@ -2438,6 +2968,13 @@ $('pbody').addEventListener('click', e => {
   if (t.id === 'moveBtn') { socket.emit('moveSlot', held); held = -1; return; }
   if (t.id === 'errandBtn') { socket.emit('errand'); return; }
   if (t.id === 'gachaBtn') { socket.emit('gacha'); return; }
+  if (t.id === 'envoyYes') { socket.emit('envoyAccept'); closePanel(); return; }
+  if (t.id === 'envoyNo') { closePanel(); return; }
+  if (t.id === 'cartPull') { socket.emit('cartPull'); closePanel(); return; }
+  if (t.id === 'cartPick') { socket.emit('cartPick'); return; }
+  if (b && b.dataset.deliver) { socket.emit('deliver', { oid: +b.dataset.deliver }); return; }
+  if (b && b.dataset.kbuy) { socket.emit('kshopBuy', +b.dataset.kbuy); return; }
+  if (b && b.dataset.ksell) { socket.emit('kshopSell', { id: b.dataset.ksell, all: !!b.dataset.all }); return; }
   if (b && b.dataset.pin) {
     const id = b.dataset.pin;
     pins = pins.includes(id) ? pins.filter(x => x !== id) : [...pins, id].slice(-3);
