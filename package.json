@@ -1,6 +1,6 @@
 {
   "name": "ant-survival",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "2D online co-op ant survival craft game",
   "main": "server.js",
   "scripts": {
